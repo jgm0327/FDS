@@ -35,3 +35,6 @@ out/
 
 ### VS Code ###
 .vscode/
+
+### CP2 Kafka Streams local RocksDB state store ###
+/data/

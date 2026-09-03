@@ -59,13 +59,13 @@
     },
     {
       "id": 4,
-      "title": "컨슈머 랙 (fds-v2-partitioning-check)",
-      "description": "docs/PERFORMANCE_MEASUREMENT.md CP1 - 수집 속도가 처리 속도를 못 따라가는지",
+      "title": "컨슈머 랙 (fds-v2-streams-app)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP1 - 수집 속도가 처리 속도를 못 따라가는지. CP2에서 transaction-events를 읽는 주체가 임시 컨슈머(fds-v2-partitioning-check)에서 Kafka Streams 토폴로지(fds-v2-streams-app)로 바뀌어서 컨슈머 그룹명을 갱신함 — 안 그러면 아무도 join 안 하는 죽은 그룹을 쿼리해서 패널이 영구히 비어있게 됨.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "targets": [
         {
-          "expr": "sum by (partition) (kafka_consumergroup_lag{consumergroup=\"fds-v2-partitioning-check\", topic=\"transaction-events\"})",
+          "expr": "sum by (partition) (kafka_consumergroup_lag{consumergroup=\"fds-v2-streams-app\", topic=\"transaction-events\"})",
           "legendFormat": "partition {{partition}}"
         }
       ]
