@@ -1,0 +1,84 @@
+{
+  "title": "FDS v2 - CP2 Kafka Streams",
+  "uid": "fds-v2-cp2",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "5s",
+  "tags": ["fds-v2", "cp2"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "레코드 처리 latency (Kafka Streams thread)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP2 - 슬라이딩 윈도우 계산 오버헤드. StreamThread가 레코드 하나를 처리하는 데 걸리는 시간(ms).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        { "expr": "kafka_stream_thread_process_latency_avg", "legendFormat": "avg" },
+        { "expr": "kafka_stream_thread_process_latency_max", "legendFormat": "max" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "State Store(RocksDB) put/get latency",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP2 - 로컬 디스크 I/O 병목 여부. account-activity-store에 대한 조회/쓰기 latency. task별로 나뉘어 있어 실제 트래픽이 몰린 task만 값이 채워지고 나머지는 NaN(정상 — 해당 파티션에 접근이 없었다는 뜻).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ns" }, "overrides": [] },
+      "targets": [
+        { "expr": "kafka_stream_state_put_latency_avg{rocksdb_state_id=\"account-activity-store\"}", "legendFormat": "put avg (task {{task_id}})" },
+        { "expr": "kafka_stream_state_get_latency_avg{rocksdb_state_id=\"account-activity-store\"}", "legendFormat": "get avg (task {{task_id}})" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "커밋 latency (changelog flush 관련)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP2 - State Store 변경사항을 changelog topic에 커밋하는 주기적 작업의 소요 시간. 값이 튀면 changelog 쓰기가 병목이라는 신호.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        { "expr": "kafka_stream_thread_commit_latency_avg", "legendFormat": "avg" },
+        { "expr": "kafka_stream_thread_commit_latency_max", "legendFormat": "max" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "리밸런싱 latency / 발생 빈도",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP2 - 인스턴스 스케일 조정 시 순간 지연. rate_per_hour가 튀면 리밸런싱이 너무 자주 일어난다는 신호(예: 세션 타임아웃 튜닝 필요).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "refId": "A", "expr": "kafka_consumer_coordinator_rebalance_latency_avg", "legendFormat": "latency avg (ms)" },
+        { "refId": "B", "expr": "kafka_consumer_coordinator_rebalance_latency_max", "legendFormat": "latency max (ms)" },
+        { "refId": "C", "expr": "kafka_consumer_coordinator_rebalance_rate_per_hour", "legendFormat": "발생 빈도 (회/시간, 오른쪽 축)" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "C" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "title": "복구(restore) 중인 태스크 수",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP2 - 장애 복구(changelog replay) 진행 상황을 보여주는 대략적인 지표. 0보다 크면 지금 State Store를 changelog에서 복구하는 중이라는 뜻 — 앱 재기동 직후 잠깐 올라갔다가 0으로 떨어지는 게 정상.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "kafka_stream_state_updater_active_restoring_tasks", "legendFormat": "active restoring" },
+        { "expr": "kafka_stream_state_updater_standby_updating_tasks", "legendFormat": "standby updating" }
+      ]
+    }
+  ]
+}
