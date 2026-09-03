@@ -21,6 +21,12 @@ repositories {
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-actuator'
 	implementation 'org.springframework.boot:spring-boot-starter-kafka'
+	// Spring Boot 4는 기본적으로 Jackson 3(tools.jackson.*)을 쓰지만, Spring Kafka의
+	// JsonSerializer/JsonDeserializer(com.fasterxml.jackson.databind 기반)는 아직 classic
+	// Jackson 2 databind를 요구한다 — 없으면 컨슈머 기동 시 NoClassDefFoundError 발생.
+	implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.6'
+	// TransactionEvent.occurredAt(Instant) 직렬화/역직렬화를 위한 java.time 지원 모듈.
+	implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.21.6'
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
 	// CP1 프로듀서 TPS/latency를 Prometheus로 수집하기 위함 (docs/PERFORMANCE_MEASUREMENT.md 참고)
 	runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
