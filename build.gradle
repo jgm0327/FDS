@@ -30,11 +30,18 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
 	// CP1 프로듀서 TPS/latency를 Prometheus로 수집하기 위함 (docs/PERFORMANCE_MEASUREMENT.md 참고)
 	runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
+	// CP2 — 계좌별 슬라이딩 윈도우 집계 토폴로지 (docs/BACKEND.md CP2 참고). 버전은 명시하지 않고
+	// Spring Boot 4.1.1 BOM에 위임 — kafka-clients(spring-boot-starter-kafka가 끌어옴)와 같은
+	// 4.2.1로 맞춰져서 버전 충돌이 없다. RocksDB(rocksdbjni)는 kafka-streams가 전이 의존성으로
+	// 끌고 오므로 별도 추가 불필요.
+	implementation 'org.apache.kafka:kafka-streams'
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'
 	testImplementation 'org.springframework.boot:spring-boot-starter-actuator-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-kafka-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	// CP2 토폴로지를 브로커 없이 검증하기 위한 TopologyTestDriver.
+	testImplementation 'org.apache.kafka:kafka-streams-test-utils'
 	testCompileOnly 'org.projectlombok:lombok'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 	testAnnotationProcessor 'org.projectlombok:lombok'
