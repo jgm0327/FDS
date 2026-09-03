@@ -1,0 +1,80 @@
+{
+  "title": "FDS v2 - App Health (JVM/CPU)",
+  "uid": "fds-v2-app-health",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "5s",
+  "tags": ["fds-v2", "jvm", "cpu"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "JVM 힙 메모리 사용량",
+      "description": "Spring Boot Actuator/Micrometer가 기본 제공 (코드 추가 없이 CP1 때부터 이미 수집 중). jvm_memory_used_bytes/jvm_memory_max_bytes.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(jvm_memory_used_bytes{area=\"heap\"})",
+          "legendFormat": "used"
+        },
+        {
+          "expr": "sum(jvm_memory_max_bytes{area=\"heap\"})",
+          "legendFormat": "max"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "CPU 사용률 (프로세스 vs 시스템)",
+      "description": "process_cpu_usage: 이 JVM 프로세스만. system_cpu_usage: 호스트 전체.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "process_cpu_usage",
+          "legendFormat": "process"
+        },
+        {
+          "expr": "system_cpu_usage",
+          "legendFormat": "system"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "GC 정지 시간 비율",
+      "description": "1분 동안 GC로 멈춰있던 시간의 비율 (rate(jvm_gc_pause_seconds_sum) — 초/초). 이 값이 높으면 힙 압박으로 애플리케이션 처리 latency에 영향.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(jvm_gc_pause_seconds_sum[1m]))",
+          "legendFormat": "GC pause ratio"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "JVM 스레드 수",
+      "description": "Kafka Streams/Kafka 컨슈머 등 스레드 누수 여부 확인용.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "jvm_threads_live_threads",
+          "legendFormat": "live"
+        },
+        {
+          "expr": "jvm_threads_daemon_threads",
+          "legendFormat": "daemon"
+        }
+      ]
+    }
+  ]
+}
