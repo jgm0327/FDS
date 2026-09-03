@@ -1,0 +1,74 @@
+{
+  "title": "FDS v2 - CP1 Kafka Partitioning",
+  "uid": "fds-v2-cp1",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "5s",
+  "tags": ["fds-v2", "cp1"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "프로듀서 발행 TPS",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP1 - 목표 TPS 대비 실제 처리량",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(fds_transaction_publish_duration_seconds_count{outcome=\"success\"}[1m]))",
+          "legendFormat": "success TPS"
+        },
+        {
+          "expr": "sum(rate(fds_transaction_publish_duration_seconds_count{outcome=\"failure\"}[1m]))",
+          "legendFormat": "failure TPS"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "프로듀서 발행 latency (p95/p99)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP1 - 파티션 키 해시 연산 오버헤드 확인",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(fds_transaction_publish_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(fds_transaction_publish_duration_seconds_bucket[1m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "파티션별 메시지 분포 (transaction-events)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP1 - 특정 파티션 쏠림(핫 파티션) 여부. kafka-exporter의 파티션별 offset 증가량 기준.",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (partition) (increase(kafka_topic_partition_current_offset{topic=\"transaction-events\"}[5m]))",
+          "legendFormat": "partition {{partition}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "컨슈머 랙 (fds-v2-partitioning-check)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP1 - 수집 속도가 처리 속도를 못 따라가는지",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (partition) (kafka_consumergroup_lag{consumergroup=\"fds-v2-partitioning-check\", topic=\"transaction-events\"})",
+          "legendFormat": "partition {{partition}}"
+        }
+      ]
+    }
+  ]
+}

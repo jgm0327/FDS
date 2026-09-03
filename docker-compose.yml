@@ -14,11 +14,67 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:19092
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,INTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:19092,INTERNAL://kafka:9094
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       CLUSTER_ID: "fds-v2-local-cluster"
+    # kafka-exporter가 뜨자마자 접속을 시도하다 "브로커가 아직 리스닝 전"이라 죽는 걸 막기 위함 —
+    # depends_on에 condition: service_healthy를 걸어 브로커가 실제로 준비된 뒤에만 기동하게 한다.
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # CP1 "파티션별 메시지 분포" / "컨슈머 랙" 지표 수집 (docs/MONITORING_SETUP.md 참고).
+  # 브로커 JMX exporter는 붙이지 않았다 — 프로듀서 TPS/latency는 이미 앱의 Micrometer Kafka
+  # client metrics로 확보되고, 남은 두 지표(파티션별 분포/컨슈머 랙)는 kafka_exporter 하나로
+  # JMX 없이도 정확히 얻을 수 있어서 브로커 JVM에 javaagent를 추가하는 복잡도를 피했다.
+  # kafka-exporter는 컴포즈 내부망에서 INTERNAL 리스너(kafka:9094)로 접속한다.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: fds-v2-kafka-exporter
+    command:
+      - "--kafka.server=kafka:9094"
+      - "--topic.filter=transaction-events"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "19308:9308"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fds-v2-prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      # 로컬에 다른 프로젝트의 Prometheus(fsd-api-prometheus-1)가 9090을 이미 점유 중이라
+      # 19090으로 우회 (kafka 19092/앱 18080과 동일한 이유, session-02 참고).
+      - "19090:9090"
+    depends_on:
+      - kafka-exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: fds-v2-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    # provisioning 트리 전체(datasources + dashboards 정의 + 대시보드 JSON)를 한 번에 마운트한다.
+    # 대시보드 JSON을 별도 볼륨으로 그 안의 하위 경로에 다시 마운트하면, 상위가 읽기 전용 바인드
+    # 마운트라 하위 마운트포인트를 만들 수 없어 컨테이너가 뜨지 않는다 — 그래서 JSON 파일도
+    # provisioning/dashboards/json/ 아래에 같이 두고 통째로 한 볼륨으로만 마운트한다.
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      # 로컬 fsd-api-grafana-1가 3000을 이미 점유 중이라 13000으로 우회.
+      - "13000:3000"
+    depends_on:
+      - prometheus
