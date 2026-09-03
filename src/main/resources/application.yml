@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: fds-v2-backend
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+    consumer:
+      group-id: fds-v2-partitioning-check
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: com.fdsv2.transaction
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics
+
+# FDS v2 전용 설정 — docs/BACKEND.md 구현 스펙 참고
+fds:
+  kafka:
+    transaction-events:
+      # 파티션 수/복제 계수는 코드 수정 없이 이 값(또는 아래 env var)만 바꿔서 조정한다.
+      # 파티션 수는 운영 중 늘리면 accountId-파티션 매핑이 깨지므로, 트래픽이 없는 지금
+      # 단계에서만 유연하게 조정 가능한 값으로 취급한다 (docs/BACKEND.md 핵심 설계 결정 1번).
+      topic-name: ${FDS_KAFKA_TOPIC_NAME:transaction-events}
+      partitions: ${FDS_KAFKA_PARTITIONS:32}
+      # 로컬 단일 브로커 docker-compose로 검증할 때는 FDS_KAFKA_REPLICATION_FACTOR=1 로 오버라이드.
+      replication-factor: ${FDS_KAFKA_REPLICATION_FACTOR:3}
+  model-serving:
+    # 실제 ModelInferenceClient 연동은 다음 세션 범위. 지금은 설정값 자리만 미리 잡아둔다
+    # (docs/BACKEND.md 핵심 설계 결정 4번 — REST 먼저, gRPC는 다음 단계).
+    torchserve:
+      base-url: ${TORCHSERVE_BASE_URL:http://localhost:8080}
+      timeout-ms: ${TORCHSERVE_TIMEOUT_MS:300}
