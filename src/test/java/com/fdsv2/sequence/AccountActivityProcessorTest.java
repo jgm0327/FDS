@@ -15,25 +15,21 @@ import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.streams.TestOutputTopic;
 import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.TopologyTestDriver;
-import org.apache.kafka.streams.kstream.Consumed;
-import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.Produced;
-import org.apache.kafka.streams.state.KeyValueStore;
-import org.apache.kafka.streams.state.StoreBuilder;
-import org.apache.kafka.streams.state.Stores;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.support.serializer.JsonSerde;
 
 /**
- * SequenceAggregationTopologyConfig가 구성하는 토폴로지를 TopologyTestDriver로 검증한다.
- * 브로커/Spring 컨텍스트 없이 토폴로지 구성을 그대로 재현해서 빠르게(수 초 이내) 돌아간다 —
- * CP1의 k6+실제 브로커 검증과는 다른, 로직 자체에 대한 빠른 회귀 테스트 역할.
+ * SequenceAggregationTopologyConfig.buildTopology(...)를 그대로 호출해서 검증한다 — 배선을 여기서
+ * 따로 베껴 쓰면 운영 코드가 바뀌어도 테스트가 못 잡아내는 문제가 있어서(코드 리뷰 지적), 프로덕션
+ * @Bean 메서드가 위임하는 것과 동일한 static 메서드를 재사용한다.
+ *
+ * 브로커/Spring 컨텍스트 없이 TopologyTestDriver로 빠르게(수 초 이내) 돌아간다 — CP1의 k6+실제
+ * 브로커 검증과는 다른, 로직 자체에 대한 빠른 회귀 테스트 역할.
  */
 class AccountActivityProcessorTest {
 
-    private static final String STORE_NAME = "account-activity-store";
     private static final String INPUT_TOPIC = "transaction-events";
     private static final String OUTPUT_TOPIC = "account-feature-updates";
     private static final Instant T0 = Instant.parse("2026-09-03T00:00:00Z");
@@ -45,17 +41,7 @@ class AccountActivityProcessorTest {
     @BeforeEach
     void setUp() {
         StreamsBuilder builder = new StreamsBuilder();
-        StoreBuilder<KeyValueStore<String, AccountActivityState>> storeBuilder = Stores.keyValueStoreBuilder(
-                Stores.persistentKeyValueStore(STORE_NAME),
-                Serdes.String(),
-                new JsonSerde<>(AccountActivityState.class));
-        builder.addStateStore(storeBuilder);
-
-        KStream<String, TransactionEvent> stream = builder.stream(
-                INPUT_TOPIC, Consumed.with(Serdes.String(), new JsonSerde<>(TransactionEvent.class)));
-        stream.processValues(() -> new AccountActivityProcessor(STORE_NAME, Duration.ofMinutes(5)), STORE_NAME)
-                .to(OUTPUT_TOPIC, Produced.with(Serdes.String(), new JsonSerde<>(AccountFeatureVector.class)));
-
+        SequenceAggregationTopologyConfig.buildTopology(builder, INPUT_TOPIC, OUTPUT_TOPIC, Duration.ofMinutes(5));
         Topology topology = builder.build();
 
         Properties props = new Properties();
@@ -85,19 +71,19 @@ class AccountActivityProcessorTest {
         assertThat(results).hasSize(3);
 
         AccountFeatureVector first = results.get(0);
-        assertThat(first.recent5MinCount()).isEqualTo(1);
+        assertThat(first.recentWindowCount()).isEqualTo(1);
         assertThat(first.amountRatio()).isEqualTo(1.0); // 첫 거래는 비교 대상 없음
         assertThat(first.lastTxGapSec()).isNull();
         assertThat(first.countryChanged()).isFalse();
 
         AccountFeatureVector second = results.get(1);
-        assertThat(second.recent5MinCount()).isEqualTo(2);
+        assertThat(second.recentWindowCount()).isEqualTo(2);
         assertThat(second.amountRatio()).isEqualTo(3.0); // 300 / (직전까지 평균 100)
         assertThat(second.lastTxGapSec()).isEqualTo(30L);
         assertThat(second.countryChanged()).isFalse();
 
         AccountFeatureVector third = results.get(2);
-        assertThat(third.recent5MinCount()).isEqualTo(3);
+        assertThat(third.recentWindowCount()).isEqualTo(3);
         assertThat(third.amountRatio()).isEqualTo(0.25); // 50 / (직전까지 평균 (100+300)/2=200)
         assertThat(third.lastTxGapSec()).isEqualTo(60L);
         assertThat(third.countryChanged()).isTrue(); // KR -> US
@@ -113,7 +99,7 @@ class AccountActivityProcessorTest {
         List<AccountFeatureVector> results = output.readValuesToList();
         assertThat(results).hasSize(4);
         // 7분 시점 기준 최근 5분 윈도우는 [2분, 7분] — 0분 거래는 윈도우를 벗어나 트리밍된다.
-        assertThat(results.get(3).recent5MinCount()).isEqualTo(3);
+        assertThat(results.get(3).recentWindowCount()).isEqualTo(3);
     }
 
     @Test
@@ -123,9 +109,48 @@ class AccountActivityProcessorTest {
         input.pipeInput("acc-1", event("acc-1", "100", "KR", T0.plusSeconds(10)));
 
         List<AccountFeatureVector> results = output.readValuesToList();
-        assertThat(results.get(0).recent5MinCount()).isEqualTo(1); // acc-1 첫 거래
-        assertThat(results.get(1).recent5MinCount()).isEqualTo(1); // acc-2 첫 거래 — acc-1과 무관
-        assertThat(results.get(2).recent5MinCount()).isEqualTo(2); // acc-1 두 번째 거래
+        assertThat(results.get(0).recentWindowCount()).isEqualTo(1); // acc-1 첫 거래
+        assertThat(results.get(1).recentWindowCount()).isEqualTo(1); // acc-2 첫 거래 — acc-1과 무관
+        assertThat(results.get(2).recentWindowCount()).isEqualTo(2); // acc-1 두 번째 거래
+    }
+
+    @Test
+    void 역전된_이벤트가_와도_이후_정상_이벤트의_경과시간_계산이_오염되지_않는다() {
+        // 코드 리뷰에서 TopologyTestDriver로 재현된 버그: 역전 이벤트가 lastTransactionTimestamp를
+        // 덮어써서, 그 다음 "정상" 이벤트의 gap까지 잘못 계산되던 문제.
+        input.pipeInput("acc-3", event("acc-3", "10", "KR", T0.plusSeconds(100))); // 기준
+        input.pipeInput("acc-3", event("acc-3", "10", "KR", T0)); // 역전된(더 이른) 이벤트
+        input.pipeInput("acc-3", event("acc-3", "10", "KR", T0.plusSeconds(130))); // 다시 정상 진행
+
+        List<AccountFeatureVector> results = output.readValuesToList();
+        assertThat(results).hasSize(3);
+        // 역전 이벤트(2번째)가 lastTransactionTimestamp를 덮어쓰지 않았다면, 3번째 이벤트의 gap은
+        // 여전히 1번째(T0+100s) 기준으로 계산되어 30초가 나와야 한다. 버그가 있었다면
+        // T0(2번째, 역전된 값) 기준 130초로 잘못 나온다.
+        assertThat(results.get(2).lastTxGapSec()).isEqualTo(30L);
+    }
+
+    @Test
+    void 역전된_이벤트로_인해_최근_건수가_영구히_부풀지_않는다() {
+        // 코드 리뷰에서 재현된 버그: 앞쪽만 트리밍하면 역전된(뒤에 남은) 오래된 타임스탬프가
+        // 윈도우를 절대 벗어나지 못해 recentWindowCount가 계속 부풀었다.
+        input.pipeInput("acc-4", event("acc-4", "10", "KR", T0.plus(Duration.ofMinutes(10))));
+        input.pipeInput("acc-4", event("acc-4", "10", "KR", T0)); // 역전된 이벤트 — 윈도우 훨씬 밖
+        // 10분 이상 지난 뒤 정상 이벤트 — 앞의 두 건 모두 윈도우 밖으로 트리밍되어야 함.
+        input.pipeInput("acc-4", event("acc-4", "10", "KR", T0.plus(Duration.ofMinutes(20))));
+
+        List<AccountFeatureVector> results = output.readValuesToList();
+        assertThat(results.get(2).recentWindowCount()).isEqualTo(1);
+    }
+
+    @Test
+    void occurredAt이나_amount가_없으면_예외_없이_건너뛴다() {
+        input.pipeInput("acc-5", new TransactionEvent("tx-bad", "acc-5", null, "grocery", "KR", null));
+        input.pipeInput("acc-5", event("acc-5", "100", "KR", T0));
+
+        List<AccountFeatureVector> results = output.readValuesToList();
+        assertThat(results).hasSize(1); // 잘못된 레코드는 건너뛰고, 다음 정상 레코드만 출력됨
+        assertThat(results.get(0).recentWindowCount()).isEqualTo(1);
     }
 
     private static TransactionEvent event(String accountId, String amount, String country, Instant occurredAt) {

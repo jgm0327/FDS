@@ -35,7 +35,8 @@ import org.springframework.kafka.support.serializer.JsonSerde;
 @EnableKafkaStreams
 public class SequenceAggregationTopologyConfig {
 
-    private static final String STORE_NAME = "account-activity-store";
+    /** package-private로 노출 — AccountActivityProcessorTest가 프로덕션과 같은 store name을 쓰기 위함. */
+    static final String STORE_NAME = "account-activity-store";
 
     @Value("${fds.kafka.transaction-events.topic-name}")
     private String inputTopic;
@@ -62,6 +63,16 @@ public class SequenceAggregationTopologyConfig {
 
     @Bean
     public KStream<String, TransactionEvent> accountActivityStream(StreamsBuilder streamsBuilder) {
+        return buildTopology(streamsBuilder, inputTopic, outputTopic, Duration.ofMinutes(recentWindowMinutes));
+    }
+
+    /**
+     * 실제 토폴로지 배선 로직. static으로 뽑아둔 이유는 AccountActivityProcessorTest가 이 메서드를
+     * 그대로 호출해서 검증하기 위함이다 — 테스트가 배선을 따로 베껴 쓰면 운영 코드가 바뀌어도
+     * 테스트가 그걸 못 잡아내는 채로 계속 통과하는 문제가 있었다 (코드 리뷰에서 지적됨).
+     */
+    static KStream<String, TransactionEvent> buildTopology(
+            StreamsBuilder streamsBuilder, String inputTopic, String outputTopic, Duration recentWindow) {
         StoreBuilder<KeyValueStore<String, AccountActivityState>> storeBuilder = Stores.keyValueStoreBuilder(
                 Stores.persistentKeyValueStore(STORE_NAME),
                 Serdes.String(),
@@ -69,8 +80,6 @@ public class SequenceAggregationTopologyConfig {
         // 로깅(changelog topic 백업)은 Kafka Streams 기본값으로 이미 켜져 있다 — 별도 설정 불필요
         // (docs/ARCHITECTURE.md 2번 "장애 대비" 요건).
         streamsBuilder.addStateStore(storeBuilder);
-
-        Duration recentWindow = Duration.ofMinutes(recentWindowMinutes);
 
         KStream<String, TransactionEvent> transactions = streamsBuilder.stream(
                 inputTopic, Consumed.with(Serdes.String(), new JsonSerde<>(TransactionEvent.class)));
