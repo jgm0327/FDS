@@ -1,0 +1,90 @@
+{
+  "title": "FDS v2 - CP4 Model Client",
+  "uid": "fds-v2-cp4",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "5s",
+  "tags": ["fds-v2", "cp4"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Circuit Breaker 상태",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP4 - 타임아웃/서킷브레이커 오픈 발생률. resilience4j_circuitbreaker_state는 state 라벨별로 현재 상태면 1, 아니면 0을 낸다 — CLOSED=0이 정상, OPEN=1로 튀는 구간이 폴백 전환 구간이다.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "expr": "resilience4j_circuitbreaker_state{name=\"torchserve\", state=\"closed\"}", "legendFormat": "CLOSED" },
+        { "expr": "resilience4j_circuitbreaker_state{name=\"torchserve\", state=\"open\"}", "legendFormat": "OPEN" },
+        { "expr": "resilience4j_circuitbreaker_state{name=\"torchserve\", state=\"half_open\"}", "legendFormat": "HALF_OPEN" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "실패율 (%)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP4 - Circuit Breaker 타임아웃 값 산정 근거. fds.model-serving.torchserve.circuit-breaker.failure-rate-threshold(기본 50%)를 넘으면 OPEN으로 전환된다.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        { "expr": "resilience4j_circuitbreaker_failure_rate{name=\"torchserve\"}", "legendFormat": "failure rate" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "TorchServe 호출 결과별 발생률",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP4 - 타임아웃/서킷브레이커 오픈 발생률. kind=successful/failed/not_permitted(서킷 오픈 중 호출 자체가 거부됨) 등으로 나뉜다.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(resilience4j_circuitbreaker_calls_seconds_count{name=\"torchserve\"}[1m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "판정 결과 - MODEL vs FALLBACK 비율",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP4 - 폴백이 얼마나 자주 발생하는지. fds.fraud.score.count 커스텀 카운터(TorchServeModelInferenceClient) 기반 — CircuitBreaker 지표와 달리 '실제로 호출부가 어떤 스코어를 냈는지'를 직접 센다.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (source) (rate(fds_fraud_score_count_total[1m]))",
+          "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "폴백 규칙 기반 스코어 응답 latency (p50/p99)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP4 - 폴백 경로가 실제로 빠른지 검증. fds.fallback.scorer.latency 자체 계측 Timer 기반(Resilience4j 지표 아님) - 이 값이 fds.model-serving.torchserve.timeout-ms보다 훨씬 작아야 '폴백이 실제로 빠르다'는 설계 의도가 성립한다.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(fds_fallback_scorer_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.99, sum(rate(fds_fallback_scorer_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "TorchServe 정상 호출 latency (p50/p95/p99)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP4 - 추론 latency. TorchServe 자체 Prometheus 지표(별도 AI 쪽 관측 확장 브랜치 예정, ai/README.md 참고)가 붙기 전까지는, 이 앱이 CircuitBreaker로 감싼 호출 자체의 성공 케이스 latency로 근사한다 - 순수 모델 추론 시간이 아니라 네트워크 왕복까지 포함된 값임에 유의.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(resilience4j_circuitbreaker_calls_seconds_bucket{name=\"torchserve\", kind=\"successful\"}[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(resilience4j_circuitbreaker_calls_seconds_bucket{name=\"torchserve\", kind=\"successful\"}[1m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(resilience4j_circuitbreaker_calls_seconds_bucket{name=\"torchserve\", kind=\"successful\"}[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    }
+  ]
+}
