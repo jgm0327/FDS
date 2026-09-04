@@ -12,7 +12,7 @@
     {
       "id": 1,
       "title": "JVM 힙 메모리 사용량",
-      "description": "Spring Boot Actuator/Micrometer가 기본 제공 (코드 추가 없이 CP1 때부터 이미 수집 중). jvm_memory_used_bytes/jvm_memory_max_bytes.",
+      "description": "Spring Boot Actuator/Micrometer가 기본 제공 (코드 추가 없이 CP1 때부터 이미 수집 중). jvm_memory_used_bytes/jvm_memory_max_bytes. 코드 리뷰 지적 + 실측 확인: 기본 GC인 G1에서는 'G1 Eden Space'/'G1 Survivor Space' 풀이 max를 -1(무제한/미정)로 보고해서, 필터 없이 그냥 sum하면 실제 -Xmx보다 낮게 잡힌다 — max 쿼리에 `> 0` 필터를 걸어 -1 풀을 제외했다.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
@@ -22,7 +22,7 @@
           "legendFormat": "used"
         },
         {
-          "expr": "sum(jvm_memory_max_bytes{area=\"heap\"})",
+          "expr": "sum(jvm_memory_max_bytes{area=\"heap\"} > 0)",
           "legendFormat": "max"
         }
       ]
