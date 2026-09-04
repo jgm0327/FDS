@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,6 +20,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 /**
  * TorchServeHttpCaller를 목으로 대체해서 "성공/실패/서킷오픈" 세 시나리오만 검증한다 — 진짜
  * HTTP 서버나 TorchServe는 필요 없다 (TorchServeHttpCaller 인터페이스 javadoc 참고).
+ * MeterRegistry는 실제 SimpleMeterRegistry를 쓴다 — 카운터/타이머 등록 자체가 예외 없이
+ * 동작하는지만 확인하면 충분해서 목으로 대체할 실익이 없다.
  * 실제 TorchServe 대상 e2e 검증은 세션 로그 참고.
  */
 @ExtendWith(MockitoExtension.class)
@@ -34,6 +37,7 @@ class TorchServeModelInferenceClientTest {
     private TorchServeHttpCaller httpCaller;
 
     private CircuitBreaker circuitBreaker;
+    private SimpleMeterRegistry meterRegistry;
     private TorchServeModelInferenceClient client;
 
     @BeforeEach
@@ -47,7 +51,9 @@ class TorchServeModelInferenceClientTest {
                 .waitDurationInOpenState(Duration.ofMinutes(1))
                 .build();
         circuitBreaker = CircuitBreaker.of("test-torchserve", config);
-        client = new TorchServeModelInferenceClient(sequenceReader, fallbackScorer, httpCaller, circuitBreaker);
+        meterRegistry = new SimpleMeterRegistry();
+        client = new TorchServeModelInferenceClient(
+                sequenceReader, fallbackScorer, httpCaller, circuitBreaker, meterRegistry);
     }
 
     @Test
@@ -63,6 +69,8 @@ class TorchServeModelInferenceClientTest {
         assertThat(score.accountId()).isEqualTo("acc-1");
         assertThat(score.fraudProbability()).isEqualTo(0.0731);
         assertThat(score.source()).isEqualTo(FraudScore.SOURCE_MODEL);
+        assertThat(meterRegistry.get("fds.fraud.score.count").tag("source", "MODEL").counter().count())
+                .isEqualTo(1.0);
     }
 
     @Test
@@ -77,6 +85,9 @@ class TorchServeModelInferenceClientTest {
         assertThat(score.fraudProbability()).isEqualTo(0.9);
         assertThat(score.source()).isEqualTo(FraudScore.SOURCE_FALLBACK);
         verify(fallbackScorer).score(latest);
+        assertThat(meterRegistry.get("fds.fraud.score.count").tag("source", "FALLBACK").counter().count())
+                .isEqualTo(1.0);
+        assertThat(meterRegistry.get("fds.fallback.scorer.latency").timer().count()).isEqualTo(1L);
     }
 
     @Test
