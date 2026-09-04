@@ -26,7 +26,7 @@ class FeatureQueryControllerTest {
 
     @BeforeEach
     void setUp() {
-        controller = new FeatureQueryController(redisTemplate, "feature:account:");
+        controller = new FeatureQueryController(redisTemplate, new FeatureStoreKeyBuilder("feature:account:"));
     }
 
     @Test

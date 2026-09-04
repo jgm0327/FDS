@@ -60,6 +60,7 @@ services:
       - "19090:9090"
     depends_on:
       - kafka-exporter
+      - redis-exporter
 
   # CP3 — 온라인 피처 스토어 (docs/BACKEND.md CP3, docs/ARCHITECTURE.md 3번 참고).
   # 호스트 포트는 16379 — 로컬에 이미 6379/6380 등을 쓰는 다른 프로젝트의 Redis가 떠 있을 수 있어

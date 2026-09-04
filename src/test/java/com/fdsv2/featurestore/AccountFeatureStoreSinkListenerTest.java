@@ -35,8 +35,7 @@ class AccountFeatureStoreSinkListenerTest {
 
     @BeforeEach
     void setUp() {
-        listener = new AccountFeatureStoreSinkListener(redisTemplate);
-        ReflectionTestUtils.setField(listener, "keyPrefix", "feature:account:");
+        listener = new AccountFeatureStoreSinkListener(redisTemplate, new FeatureStoreKeyBuilder("feature:account:"));
         ReflectionTestUtils.setField(listener, "ttlMinutes", 30L);
     }
 

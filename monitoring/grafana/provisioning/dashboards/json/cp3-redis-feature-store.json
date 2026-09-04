@@ -12,15 +12,15 @@
     {
       "id": 1,
       "title": "GET/SET latency (p50/p99)",
-      "description": "docs/PERFORMANCE_MEASUREMENT.md CP3 - 1ms 이내 목표 달성 여부. redis_latency_percentiles_usec는 Redis 자체 LATENCY HISTOGRAM 기반이라 실제 명령 처리 시간을 정확히 반영한다. p95는 redis_exporter가 제공하지 않아 p50/p99/p99.9로 대체.",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP3 - 1ms 이내 목표 달성 여부. redis_latency_percentiles_usec는 Redis 자체 LATENCY HISTOGRAM 기반이라 실제 명령 처리 시간을 정확히 반영한다. p95는 redis_exporter가 제공하지 않아 p50/p99/p99.9로 대체. quantile 라벨 값이 실측 중 \"50\"/\"50.0\"처럼 실행마다 다르게 나오는 걸 확인해서(같은 exporter, 같은 버전인데도 비결정적) 정규식으로 둘 다 매칭한다.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "fieldConfig": { "defaults": { "unit": "µs" }, "overrides": [] },
       "targets": [
-        { "expr": "redis_latency_percentiles_usec{cmd=\"get\", quantile=\"50.0\"}", "legendFormat": "GET p50" },
-        { "expr": "redis_latency_percentiles_usec{cmd=\"get\", quantile=\"99.0\"}", "legendFormat": "GET p99" },
-        { "expr": "redis_latency_percentiles_usec{cmd=\"set\", quantile=\"50.0\"}", "legendFormat": "SET p50" },
-        { "expr": "redis_latency_percentiles_usec{cmd=\"set\", quantile=\"99.0\"}", "legendFormat": "SET p99" }
+        { "expr": "redis_latency_percentiles_usec{cmd=\"get\", quantile=~\"50(\\\\.0)?\"}", "legendFormat": "GET p50" },
+        { "expr": "redis_latency_percentiles_usec{cmd=\"get\", quantile=~\"99(\\\\.0)?\"}", "legendFormat": "GET p99" },
+        { "expr": "redis_latency_percentiles_usec{cmd=\"set\", quantile=~\"50(\\\\.0)?\"}", "legendFormat": "SET p50" },
+        { "expr": "redis_latency_percentiles_usec{cmd=\"set\", quantile=~\"99(\\\\.0)?\"}", "legendFormat": "SET p99" }
       ]
     },
     {

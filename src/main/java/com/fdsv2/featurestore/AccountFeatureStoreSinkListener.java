@@ -27,9 +27,7 @@ import org.springframework.stereotype.Component;
 public class AccountFeatureStoreSinkListener {
 
     private final StringRedisTemplate redisTemplate;
-
-    @Value("${fds.feature-store.key-prefix}")
-    private String keyPrefix;
+    private final FeatureStoreKeyBuilder keyBuilder;
 
     @Value("${fds.feature-store.ttl-minutes}")
     private long ttlMinutes;
@@ -51,7 +49,7 @@ public class AccountFeatureStoreSinkListener {
             return;
         }
 
-        String redisKey = keyPrefix + accountId;
+        String redisKey = keyBuilder.key(accountId);
         redisTemplate.opsForValue().set(redisKey, featureJson, Duration.ofMinutes(ttlMinutes));
         log.debug("Redis 피처 스토어 갱신: key={}, ttlMinutes={}", redisKey, ttlMinutes);
     }

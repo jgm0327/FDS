@@ -3,39 +3,35 @@ import { check, sleep } from 'k6';
 
 // CP3 — 온라인 피처 스토어 조회 부하 시나리오 (docs/PERFORMANCE_MEASUREMENT.md CP3 참고)
 //
-// 1) 먼저 계좌 풀(ACCOUNT_POOL_SIZE)만큼 거래를 발행해서 Redis에 피처를 채워 넣고
-// 2) 그 계좌들을 반복 조회(GET /api/features/{accountId})해서 캐시 히트율/GET latency를 관측한다.
-// 가끔 존재하지 않는 계좌를 섞어서 캐시 미스도 발생시킨다 (히트율이 100%로만 나오면 의미가 없음).
+// setup()에서 계좌 풀(ACCOUNT_POOL_SIZE)만큼 거래를 발행해서 Redis에 피처를 채우고, 실제로
+// Redis에 반영됐는지 GET으로 폴링해서 확인한 뒤에야 lookups 시나리오를 시작한다. 그 계좌들을
+// 반복 조회(GET /api/features/{accountId})해서 캐시 히트율/GET latency를 관측하고, 가끔 존재하지
+// 않는 계좌를 섞어서 캐시 미스도 발생시킨다 (히트율이 100%로만 나오면 의미가 없음).
 //
 // GET /api/features/{accountId}는 CP4(모델 서빙)가 아직 없어서 이번 관측 확장 브랜치에서
-// "측정 전용"으로 추가한 엔드포인트다 (FeatureQueryController 참고) — 진짜 서빙 로직이 아니다.
+// "측정 전용"으로 추가한 엔드포인트다 (FeatureQueryController 참고) — 진짜 서빙 로직이 아니고,
+// 기본적으로 꺼져 있다. 실행 전에 아래처럼 켜야 한다:
 //
-// 실행 예:
+//   FDS_FEATURE_STORE_QUERY_ENDPOINT_ENABLED=true ./gradlew bootRun
 //   k6 run k6/cp3-feature-lookup-test.js
+//
+// 처음엔 "워밍업 시나리오 + 5초 대기" 방식으로 했는데, Kafka Streams -> Redis 싱크까지 이어지는
+// 비동기 파이프라인이 5초 안에 못 끝나면 lookups가 아직 안 채워진 계좌를 때려서 미스율이
+// 의도(10%)보다 훨씬 높게 부풀어 오르는 문제가 있었다(코드 리뷰 지적) — setup()에서 폴링으로
+// "진짜 준비됐는지" 확인하는 방식으로 바꿔서 근본적으로 해결했다.
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:18080';
 const ACCOUNT_POOL_SIZE = Number(__ENV.ACCOUNT_POOL_SIZE || 50);
 const MISS_RATE = Number(__ENV.MISS_RATE || 0.1);
+const WARMUP_TIMEOUT_MS = 20000;
 
 export const options = {
   scenarios: {
-    // vus: 1로 고정 — shared-iterations에서 __ITER는 VU마다 0부터 다시 세는 로컬 카운터라,
-    // VU를 여러 개 쓰면 accountId(__ITER % ACCOUNT_POOL_SIZE)가 계좌 풀 전체를 못 덮고 일부
-    // 계좌에만 겹쳐서 채워진다 — 실제로 5 VU로 돌려봤다가 계좌 50개 중 10개에만 데이터가 들어가서
-    // 캐시 미스율이 의도한 10%가 아니라 82%로 나오는 걸 확인하고 나서 1 VU로 고쳤다.
-    warm_up: {
-      executor: 'shared-iterations',
-      vus: 1,
-      iterations: ACCOUNT_POOL_SIZE,
-      exec: 'warmUp',
-      maxDuration: '30s',
-    },
     lookups: {
       executor: 'constant-vus',
       vus: 20,
       duration: '30s',
       exec: 'lookup',
-      startTime: '5s', // warm_up이 끝날 시간을 감안한 여유
     },
   },
   thresholds: {
@@ -47,20 +43,44 @@ function accountId(i) {
   return `acc-cp3-lookup-${i}`;
 }
 
-export function warmUp() {
-  const id = accountId(__ITER % ACCOUNT_POOL_SIZE);
-  const payload = JSON.stringify({
-    transactionId: `warmup-${id}-${Date.now()}`,
-    accountId: id,
-    amount: Number((Math.random() * 1000).toFixed(2)),
-    merchantCategory: 'RETAIL',
-    country: 'KR',
-    occurredAt: new Date().toISOString(),
-  });
-  http.post(`${BASE_URL}/api/transactions`, payload, {
-    headers: { 'Content-Type': 'application/json' },
-  });
-  sleep(0.1);
+// setup()은 k6가 시나리오를 시작하기 전에 딱 한 번 실행한다 — 여기서 계좌 풀을 채우고, Redis에
+// 실제로 반영됐는지 확인이 끝난 뒤에만 아래 lookup() 시나리오가 시작되게 한다.
+export function setup() {
+  for (let i = 0; i < ACCOUNT_POOL_SIZE; i++) {
+    const id = accountId(i);
+    const payload = JSON.stringify({
+      transactionId: `warmup-${id}`,
+      accountId: id,
+      amount: Number((Math.random() * 1000).toFixed(2)),
+      merchantCategory: 'RETAIL',
+      country: 'KR',
+      occurredAt: new Date().toISOString(),
+    });
+    http.post(`${BASE_URL}/api/transactions`, payload, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const deadline = Date.now() + WARMUP_TIMEOUT_MS;
+  let allReady = false;
+  while (Date.now() < deadline && !allReady) {
+    allReady = true;
+    for (let i = 0; i < ACCOUNT_POOL_SIZE; i++) {
+      const res = http.get(`${BASE_URL}/api/features/${accountId(i)}`);
+      if (res.status !== 200) {
+        allReady = false;
+        break;
+      }
+    }
+    if (!allReady) {
+      sleep(0.5);
+    }
+  }
+  if (!allReady) {
+    console.warn(
+      `${WARMUP_TIMEOUT_MS}ms 안에 계좌 풀 전체가 Redis에 반영되지 않음 — 미스율이 의도(${MISS_RATE * 100}%)보다 높게 나올 수 있음`
+    );
+  }
 }
 
 export function lookup() {

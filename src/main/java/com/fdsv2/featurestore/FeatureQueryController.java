@@ -1,6 +1,6 @@
 package com.fdsv2.featurestore;
 
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -17,23 +17,32 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * CP4가 실제 모델 서빙 로직에서 이 자리를 대체/확장할 예정이라, 캐싱/재시도/타임아웃 같은 실제
  * 서빙 관심사는 전혀 다루지 않는다 — 딱 "Redis GET 한 번"만 한다.
+ *
+ * 코드 리뷰 지적: 인증/인가도 없이 계좌ID만 알면 그 계좌의 사기 탐지 피처(최근 거래 횟수, 금액
+ * 배율, 국가 변경 여부 등)를 누구나 조회할 수 있어서, CP4가 늦어지면 이 "측정 전용" 엔드포인트가
+ * 인증 없는 프로덕션 API로 영구히 남을 위험이 있다. 그래서 기본값 false인 플래그
+ * (fds.feature-store.query-endpoint-enabled) 뒤에 숨겨서, 측정할 때만 명시적으로 켜야 하고
+ * 아무 설정 없이 배포하면 이 엔드포인트 자체가 빈에 등록되지 않는다.
  */
 @RestController
+@ConditionalOnProperty(
+        prefix = "fds.feature-store",
+        name = "query-endpoint-enabled",
+        havingValue = "true",
+        matchIfMissing = false)
 public class FeatureQueryController {
 
     private final StringRedisTemplate redisTemplate;
-    private final String keyPrefix;
+    private final FeatureStoreKeyBuilder keyBuilder;
 
-    public FeatureQueryController(
-            StringRedisTemplate redisTemplate,
-            @Value("${fds.feature-store.key-prefix}") String keyPrefix) {
+    public FeatureQueryController(StringRedisTemplate redisTemplate, FeatureStoreKeyBuilder keyBuilder) {
         this.redisTemplate = redisTemplate;
-        this.keyPrefix = keyPrefix;
+        this.keyBuilder = keyBuilder;
     }
 
     @GetMapping(value = "/api/features/{accountId}", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> getFeature(@PathVariable String accountId) {
-        String featureJson = redisTemplate.opsForValue().get(keyPrefix + accountId);
+        String featureJson = redisTemplate.opsForValue().get(keyBuilder.key(accountId));
         if (featureJson == null) {
             return ResponseEntity.notFound().build();
         }
