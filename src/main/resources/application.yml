@@ -1,8 +1,22 @@
 spring:
   application:
     name: fds-v2-backend
+  data:
+    # CP3 — 온라인 피처 스토어 (docs/BACKEND.md CP3 참고). StringRedisTemplate은 Spring Boot가
+    # 이 설정만으로 자동 구성해준다 — 별도 @Configuration 불필요.
+    redis:
+      host: ${FDS_REDIS_HOST:localhost}
+      port: ${FDS_REDIS_PORT:6379}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # CP3 — account-feature-updates 토픽을 구독해서 Redis에 쓰는 싱크 컨슈머 전용 설정.
+    # 키/값 모두 String으로 그대로 읽는다 — CP2의 AccountFeatureVector Java 타입에 의존하지 않고
+    # JSON 원문을 그대로 Redis에 저장하기 위함 (두 브랜치가 "토픽 스키마(JSON 형태)"로만
+    # 연결되게 하려는 의도, docs/WORKTREE_SETUP.md 병렬 브랜치 원칙 참고).
+    consumer:
+      group-id: fds-v2-redis-feature-sink
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
@@ -57,6 +71,12 @@ fds:
   sequence-aggregation:
     # 슬라이딩 윈도우 크기(분). ARCHITECTURE.md/PERFORMANCE_MEASUREMENT.md의 "최근 5분" 예시를 기본값으로.
     recent-window-minutes: ${FDS_RECENT_WINDOW_MINUTES:5}
+  feature-store:
+    # docs/ARCHITECTURE.md 3번 — 키: feature:account:{accountId}
+    key-prefix: ${FDS_FEATURE_STORE_KEY_PREFIX:feature:account:}
+    # TTL(분). 거래가 계속 들어오면 매번 같은 키에 덮어쓰며 TTL도 리셋되므로, 활발한 계좌는 사실상
+    # 삭제되지 않는다. 30분간 거래가 없으면 자동 삭제(ARCHITECTURE.md 예시값 그대로).
+    ttl-minutes: ${FDS_FEATURE_STORE_TTL_MINUTES:30}
   model-serving:
     # 실제 ModelInferenceClient 연동은 다음 세션 범위. 지금은 설정값 자리만 미리 잡아둔다
     # (docs/BACKEND.md 핵심 설계 결정 4번 — REST 먼저, gRPC는 다음 단계).

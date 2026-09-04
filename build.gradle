@@ -35,6 +35,8 @@ dependencies {
 	// 4.2.1로 맞춰져서 버전 충돌이 없다. RocksDB(rocksdbjni)는 kafka-streams가 전이 의존성으로
 	// 끌고 오므로 별도 추가 불필요.
 	implementation 'org.apache.kafka:kafka-streams'
+	// CP3 — 온라인 피처 스토어 (docs/BACKEND.md CP3 참고).
+	implementation 'org.springframework.boot:spring-boot-starter-data-redis'
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'
 	testImplementation 'org.springframework.boot:spring-boot-starter-actuator-test'
