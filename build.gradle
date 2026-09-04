@@ -37,6 +37,11 @@ dependencies {
 	implementation 'org.apache.kafka:kafka-streams'
 	// CP3 — 온라인 피처 스토어 (docs/BACKEND.md CP3 참고).
 	implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+	// CP4 model-client — TorchServe 호출 실패/타임아웃 시 서킷브레이커로 폴백 전환 (ARCHITECTURE.md
+	// 4번). Spring Boot의 auto-configuration에 의존하지 않는 core 모듈만 추가 — Boot 4.1이 최신이라
+	// resilience4j-spring-boot3 스타터의 auto-configuration이 이 버전과 안 맞을 위험을 피하고,
+	// CircuitBreaker를 직접 빈으로 구성한다 (com.fdsv2.modelclient.TorchServeModelInferenceClient 참고).
+	implementation 'io.github.resilience4j:resilience4j-circuitbreaker:2.2.0'
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'
 	testImplementation 'org.springframework.boot:spring-boot-starter-actuator-test'
