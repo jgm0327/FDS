@@ -49,6 +49,15 @@ management:
     web:
       exposure:
         include: health,prometheus,metrics
+  metrics:
+    distribution:
+      # CP4 관측 확장(backend/model-client-observability) — 기본값(false)이면 Resilience4j
+      # CircuitBreaker 호출 Timer(resilience4j.circuitbreaker.calls)가 count/sum만 남기고 분위수
+      # 버킷을 안 만들어서 Grafana에서 p50/p95/p99를 histogram_quantile로 못 뽑는다. CP2가 Kafka
+      # Streams RocksDB 지표를 보려고 metrics.recording.level을 DEBUG로 올렸던 것과 같은 이유로,
+      # 여기서도 명시적으로 켠다.
+      percentiles-histogram:
+        resilience4j.circuitbreaker.calls: true
 
 # FDS v2 전용 설정 — docs/BACKEND.md 구현 스펙 참고
 fds:
@@ -111,6 +120,12 @@ fds:
         # 이 값보다 호출 횟수가 적으면 실패율 계산 자체를 안 해서(신뢰 구간 부족), 초반에
         # 우연히 몇 번 실패했다고 바로 OPEN되는 걸 방지한다.
         minimum-number-of-calls: ${TORCHSERVE_CB_MINIMUM_CALLS:10}
+        # HALF_OPEN 상태에서 "시험 호출"로 몇 건까지 동시에 흘려보낼지. resilience4j 기본값(10)을
+        # 그대로 두면, 동시 요청이 많은 상황(k6 부하테스트 등)에서 회복 시도 자체가 TorchServe
+        # 단일 워커에 다시 부하를 몰아줘서 영원히 OPEN에서 못 벗어나는 걸 실측으로 확인했다
+        # (ModelClientConfig 클래스 javadoc, 세션 로그 참고). 작게 잡아서 회복 시도의 부하 자체를
+        # 줄인다.
+        permitted-calls-in-half-open-state: ${TORCHSERVE_CB_PERMITTED_CALLS_HALF_OPEN:3}
     # CP4 수동/부하 검증용(FraudScoreController) — 기본 false, CP3 query-endpoint-enabled와
     # 같은 이유(인증 없는 계좌별 조회 API가 프로덕션에 실수로 남는 것 방지).
     query-endpoint-enabled: ${FDS_MODEL_SERVING_QUERY_ENDPOINT_ENABLED:false}
