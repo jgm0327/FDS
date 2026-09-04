@@ -177,3 +177,68 @@ Kafka Streams 슬라이딩 윈도우 집계 토폴로지. CP1의 임시 검증 �
    (docs/ARCHITECTURE.md 2번 "장애 대비" 요건)
 4. `/code-review`로 머지 전 리뷰 → 실질적인 버그 다수 발견 → 전부 수정 후 재테스트 통과 확인
    (위 "코드 리뷰로 발견/수정한 문제" 참고)
+
+---
+
+## CP2 관측 확장 — `backend/kafka-streams-observability` 브랜치
+
+`docs/PERFORMANCE_MEASUREMENT.md` CP2 표(레코드 처리 latency, State Store 조회/쓰기 latency,
+changelog 쓰기 lag, 리밸런싱 발생 횟수/소요시간)에 대응하는 Kafka Streams 자체 지표를
+Prometheus/Grafana에 연결한다. CP1의 모니터링 스택(`docs/MONITORING_SETUP.md`)에 이어서
+`monitoring/grafana/provisioning/dashboards/json/cp2-kafka-streams.json` 대시보드를 추가.
+
+### 구현 컴포넌트
+
+- `SequenceAggregationTopologyConfig.kafkaStreamsMicrometerConfigurer` — `StreamsBuilderFactoryBeanConfigurer`
+  빈으로 `KafkaStreamsMicrometerListener`(Spring Kafka 공식 확장 포인트)를 등록해서, KafkaStreams
+  인스턴스가 시작될 때 자동으로 지표를 MeterRegistry에 바인딩.
+- `application.yml`의 `spring.kafka.streams.properties.metrics.recording.level: DEBUG` — 기본값(INFO)
+  에서는 RocksDB State Store 지표가 아예 기록되지 않아서 올려야 함.
+- `SequenceAggregationTopologyConfig.kafkaStreamsMetricsAllowlistFilter` — 아래 "실측 중 발견한
+  문제"에서 설명하는 이유로, `kafka.stream.*`/`kafka.consumer.*`/`kafka.admin.*` 지표를 화이트리스트로
+  걸러서 노출한다.
+- `k6/cp2-sequence-aggregation-test.js` — 계좌 하나에 지속적으로 부하를 걸어서 위 지표들이 실제
+  값(NaN이 아닌)으로 채워지는지 확인하는 시나리오.
+
+### 실측 중 발견한 문제 — `KafkaStreamsMicrometerListener` 전체 바인딩의 함정
+
+`KafkaStreamsMicrometerListener`를 기본 방식대로(필터 없이) 붙였더니, `/actuator/prometheus`가
+`"-1.0: counters cannot have a negative value"` 예외로 500을 내는 걸 실측 중 확인했다. 원인은
+이 리스너가 raw Kafka 지표를 **이름 패턴만 보고** 기계적으로 분류하기 때문이다 — 이름이 `-total`로
+끝나면 무조건 Micrometer `FunctionCounter`(누적 카운터, 음수 불가)로 취급하는데, Kafka Streams 지표
+중에는 이름만 `-total`이고 실제로는 감소할 수 있는 값(예: `restore-remaining-records-total` = 아직
+복구해야 할 남은 레코드 수, restore가 진행되며 줄어들고 restore 중이 아닌 태스크에서는 `-1`
+sentinel을 냄)이 섞여 있다.
+
+- 1차 시도: 문제 지표 하나만 이름으로 차단 → k6 부하를 다시 걸자 **다른** `-total` 지표가 똑같은
+  예외를 냄(`-3.0`). 어떤 지표가 언제 음수를 낼지 사전에 다 알 수 없다는 뜻.
+- 최종 결정: 블랙리스트(문제 생길 때마다 하나씩 차단) 대신 **화이트리스트**로 전환. CP2 대시보드가
+  실제로 필요로 하는 지표(레코드 처리/put/get/e2e/restore latency, 리밸런싱 latency/빈도)만 이름으로
+  명시적으로 허용하고, `kafka.stream.*`/`kafka.consumer.*`/`kafka.admin.*` 아래 나머지는 전부 차단.
+  이러면 앞으로 어떤 새 지표가 음수를 내든 애초에 노출되지 않는다. `kafka.producer.*`는 CP1
+  프로듀서가 의존할 수 있고 크래시난 적도 없어서 건드리지 않았다.
+- 트레이드오프: 화이트리스트에 없는 지표(예: 진짜 "changelog 쓰기 lag"에 가장 가까운
+  `restore-remaining-records-total`)는 아예 안 보인다. 대신 `kafka_consumergroup_lag{consumergroup="fds-v2-streams-app"}`
+  (CP1 kafka-exporter, 이미 존재)를 "이 앱이 입력 토픽을 얼마나 잘 따라가는지"의 근사치로,
+  `kafka.stream.state.updater.active.restoring.tasks`(화이트리스트에 포함)를 "지금 복구 중인지
+  아닌지"의 대략적인 신호로 쓴다.
+
+### 이번 범위에서 제외하는 것
+
+- `restore-remaining-records-total`을 커스텀 Gauge로 직접 등록해서 안전하게 노출하는 방법 — raw
+  `kafkaStreams.metrics()`를 직접 순회해서 값을 읽어와야 해서 별도 작업. 지금은
+  `active-restoring-tasks`로 충분히 대체된다고 판단해서 미룸.
+- CP1 대시보드처럼 Grafana Image Renderer로 k6 실행 후 PNG 자동 저장 — CP1 세션에서 이미 미룬 결정
+  그대로 유지.
+
+### 완료 후 확인 방법 (실제로 수행함)
+
+1. `k6/cp2-sequence-aggregation-test.js`(계좌 1개, 10 VU, 60초, ~460 req/s)를 두 번 연속 실행하며
+   매번 `/actuator/prometheus`가 200을 유지하는지 확인 — 화이트리스트 적용 전에는 이 부하로 매번
+   500이 재현됐고, 적용 후에는 두 번 다 안정적으로 200이 나오는 걸 확인.
+2. `kafka_stream_thread_process_latency_avg/max`, `kafka_stream_state_put_latency_avg/max`,
+   `kafka_stream_state_get_latency_avg/max`, `kafka_stream_thread_commit_latency_avg/max`,
+   `kafka_consumer_coordinator_rebalance_rate_per_hour` 등이 실제 값(NaN 아님)으로 채워지는 것을
+   Prometheus 쿼리로 직접 확인.
+3. Grafana에서 `FDS v2 - CP2 Kafka Streams` 대시보드 5개 패널이 전부 실데이터로 렌더링되는 것을
+   스크린샷으로 확인 (`docs/performance-results/2026-09-03_cp2-kafka-streams-dashboard.jpg`).

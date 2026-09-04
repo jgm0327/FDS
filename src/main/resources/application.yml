@@ -21,6 +21,14 @@ spring:
       # RocksDB state store 로컬 경로. Windows 로컬 개발 편의를 위해 상대경로를 기본값으로 두고,
       # 운영/컨테이너 환경에서는 env var로 오버라이드한다.
       state-dir: ${FDS_KAFKA_STREAMS_STATE_DIR:./data/kafka-streams}
+      properties:
+        # CP2 패널 확장(docs/PERFORMANCE_MEASUREMENT.md) — 기본값(INFO)에서는 RocksDB 지표가
+        # 아예 기록되지 않는다. DEBUG로 올려야 State Store put/get latency 등을 볼 수 있다.
+        # (레코드 처리 latency/changelog lag/리밸런싱 지표는 INFO에서도 이미 노출됨.)
+        # 코드 리뷰 지적: DEBUG는 지표 계산 오버헤드가 있고 이번에 겪은 "이름과 실제 의미가 다른
+        # 지표가 음수를 내는" 문제의 노출 범위이기도 하므로, 운영에서 끄고 싶을 때 코드 수정 없이
+        # env var로 되돌릴 수 있게 함 (CP1에서 세운 "코드 수정 없이 조정 가능하게" 원칙과 동일).
+        metrics.recording.level: ${FDS_KAFKA_STREAMS_METRICS_LEVEL:DEBUG}
 
 management:
   endpoints:
