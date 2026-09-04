@@ -34,9 +34,14 @@ public class AccountFeatureStoreSinkListener {
     @Value("${fds.feature-store.ttl-minutes}")
     private long ttlMinutes;
 
+    // 코드 리뷰 지적: account-feature-updates는 32개 파티션인데 concurrency 지정이 없으면 Spring
+    // Kafka가 스레드 하나로 32개 파티션을 전부 처리한다 — CP1/CP2가 파티션 병렬성을 전제로 설계된
+    // 것과 어긋난다. 인스턴스 하나에서 무작정 32로 올리면 오히려 과할 수 있어, 실측 후 조정 가능한
+    // 값으로 4를 기본값으로 잡았다(CP1의 "넉넉하게 시작 → 실측 후 조정" 원칙과 동일, 다음 개선 후보).
     @KafkaListener(
             topics = "${fds.kafka.feature-updates.topic-name}",
-            groupId = "${spring.kafka.consumer.group-id}")
+            groupId = "${spring.kafka.consumer.group-id}",
+            concurrency = "${fds.feature-store.consumer-concurrency:4}")
     public void onFeatureUpdate(ConsumerRecord<String, String> record) {
         String accountId = record.key();
         String featureJson = record.value();

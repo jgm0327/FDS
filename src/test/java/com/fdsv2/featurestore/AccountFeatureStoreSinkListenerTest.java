@@ -1,5 +1,6 @@
 package com.fdsv2.featurestore;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -68,5 +69,20 @@ class AccountFeatureStoreSinkListenerTest {
 
         verify(valueOperations).set(eq("feature:account:acc-1"), eq("{\"recentWindowCount\":1}"), any(Duration.class));
         verify(valueOperations).set(eq("feature:account:acc-1"), eq("{\"recentWindowCount\":2}"), any(Duration.class));
+    }
+
+    @Test
+    void redis_쓰기_실패시_예외를_삼키지_않고_그대로_전파한다() {
+        // 코드 리뷰 지적: 에러 처리가 전혀 없어서 Redis 장애 시 레코드가 조용히 유실되던 문제.
+        // 여기서 예외를 삼키지 않고 그대로 던져야 FeatureStoreKafkaConfig의 DefaultErrorHandler가
+        // 재시도할 기회를 얻는다 — 리스너 메서드 안에서 조용히 catch하면 재시도 자체가 불가능해진다.
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        RuntimeException redisFailure = new RuntimeException("Redis connection refused");
+        org.mockito.Mockito.doThrow(redisFailure).when(valueOperations)
+                .set(any(String.class), any(String.class), any(Duration.class));
+
+        assertThatThrownBy(() -> listener.onFeatureUpdate(
+                new ConsumerRecord<>("account-feature-updates", 0, 0, "acc-1", "{\"recentWindowCount\":1}")))
+                .isSameAs(redisFailure);
     }
 }
