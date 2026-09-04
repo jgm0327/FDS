@@ -77,6 +77,11 @@ fds:
     # TTL(분). 거래가 계속 들어오면 매번 같은 키에 덮어쓰며 TTL도 리셋되므로, 활발한 계좌는 사실상
     # 삭제되지 않는다. 30분간 거래가 없으면 자동 삭제(ARCHITECTURE.md 예시값 그대로).
     ttl-minutes: ${FDS_FEATURE_STORE_TTL_MINUTES:30}
+    # CP4(ai/pytorch-sequence-model) 연동 — 스냅샷과 별개로 유지하는 "최근 거래 시퀀스" Redis LIST의
+    # 최대 길이. ai/pytorch_sequence_model/config.py의 MAX_SEQ_LEN과 반드시 같은 값이어야 한다
+    # (backend/sequence-window-feature-store 세션 로그 참고) — 한쪽만 바꾸면 서빙 시점에 모델이
+    # 기대하는 컨텍스트 길이와 실제로 주어지는 시퀀스 길이가 어긋난다.
+    recent-window-size: ${FDS_FEATURE_STORE_RECENT_WINDOW_SIZE:30}
     # account-feature-updates가 32개 파티션이라, concurrency 없이는 컨슈머 스레드 하나가 전부
     # 처리한다(코드 리뷰 지적) — 넉넉하게 시작해서 실측 후 조정 (docs/BACKEND.md 핵심 설계 결정 1번과
     # 같은 원칙).

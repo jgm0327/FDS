@@ -93,8 +93,8 @@ public class AccountActivityProcessor implements FixedKeyProcessor<String, Trans
         }
         store.put(accountId, state);
 
-        AccountFeatureVector feature =
-                new AccountFeatureVector(accountId, recentCount, amountRatio, lastTxGapSec, countryChanged);
+        AccountFeatureVector feature = new AccountFeatureVector(
+                accountId, recentCount, amountRatio, lastTxGapSec, countryChanged, event.merchantCategory());
         // CP1 k6 시나리오처럼 계좌 하나에 초당 수백 건이 몰리는 상황에서 INFO 레벨 로깅 자체가
         // 병목이 될 수 있어 debug로 낮췄다 (필요할 때만 로그 레벨을 올려서 확인).
         log.debug("계좌 피처 갱신: accountId={}, recentWindowCount={}, amountRatio={}, lastTxGapSec={}, countryChanged={}",
