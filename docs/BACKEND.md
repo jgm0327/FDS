@@ -242,3 +242,51 @@ sentinel을 냄)이 섞여 있다.
    Prometheus 쿼리로 직접 확인.
 3. Grafana에서 `FDS v2 - CP2 Kafka Streams` 대시보드 5개 패널이 전부 실데이터로 렌더링되는 것을
    스크린샷으로 확인 (`docs/performance-results/2026-09-03_cp2-kafka-streams-dashboard.jpg`).
+
+---
+
+## 3차 구현 범위 (CP3) — `backend/redis-feature-store` 브랜치
+
+온라인 피처 스토어. CP2가 발행하는 `account-feature-updates` 토픽을 Redis로 옮겨 담는다
+(`docs/ARCHITECTURE.md` 3단계 대응).
+
+### 스펙 (ARCHITECTURE.md 그대로)
+
+- 키: `feature:account:{accountId}`
+- 값: 계산이 끝난 최종 피처 벡터 JSON (CP2의 `AccountFeatureVector` 그대로)
+- 저장 방식: 개별 거래 기록이 아니라 **집계 결과만** 저장. 새 거래마다 같은 키에 덮어씀(append 아님)
+- TTL: 30분(기본값, `fds.feature-store.ttl-minutes`). 거래가 계속 들어오면 매번 갱신되며 TTL도
+  리셋 → 활발한 계좌는 사실상 삭제 안 됨. 30분간 거래가 없으면 자동 삭제.
+
+### 구현 컴포넌트
+
+- `com.fdsv2.featurestore.AccountFeatureStoreSinkListener` — `@KafkaListener`로
+  `account-feature-updates`를 구독해서 Redis에 SET(TTL 포함).
+- `build.gradle`: `spring-boot-starter-data-redis` 추가. `StringRedisTemplate`은 Spring Boot가
+  `spring.data.redis.host/port` 설정만으로 자동 구성해줘서 별도 `@Configuration` 불필요.
+- `docker-compose.yml`: `redis:7-alpine` 서비스 추가 (호스트 포트 16379 — 로컬 다른 프로젝트
+  Redis(6379/6380)와 충돌 회피).
+
+### 핵심 설계 결정
+
+1. **CP2의 `AccountFeatureVector` 자바 타입에 의존하지 않음**: 값을 역직렬화하지 않고 원문 JSON
+   문자열 그대로 Redis에 저장한다. CP2와 CP3 사이의 계약은 "토픽에 담긴 JSON 형태"뿐이고, CP3는
+   CP2의 도메인 클래스를 몰라도 된다 — 병렬 worktree 원칙(서로 파일 안 건드리기)을 코드 레벨까지
+   지킨 것. CP2가 필드를 추가/변경해도 CP3는 재컴파일 없이 그대로 통과시킨다.
+2. **Kafka Streams가 아니라 평범한 `@KafkaListener`**: 이 컴포넌트는 상태를 안 가지는 단순
+   "읽어서 그대로 쓰기"라 Kafka Streams 같은 스테이트풀 처리 엔진이 필요 없다. CP1의 임시
+   컨슈머와 같은 도구(`@KafkaListener`)를 쓰되, 이번엔 "임시"가 아니라 CP3의 정식 컴포넌트다.
+3. **읽기(GET) API는 이번 범위에서 안 만듦**: ARCHITECTURE.md 파이프라인 경계상 "Redis에서 조회"는
+   CP4(모델 서빙)의 역할이라, CP3는 쓰기 경로만 책임진다. 검증은 `redis-cli GET`으로 직접 확인.
+4. **Redis Exporter/Grafana 패널은 이번 범위에서 제외**: CP1(Prometheus/kafka-exporter)·CP2
+   (Kafka Streams 지표)와 같은 패턴으로 다음에 별도로 붙일 수 있다 — 이번엔 "Redis에 정확히
+   쓰이는가"까지만 검증.
+
+### 완료 후 확인 방법 (실제로 수행함)
+
+1. `./gradlew test` — Mockito로 `StringRedisTemplate`을 모킹해서 키/값/TTL이 정확히 호출되는지,
+   키/값이 없는 레코드는 건너뛰는지, 같은 계좌 재발행 시 SET이 두 번 나가는지(덮어쓰기 스펙) 검증.
+2. 실제 브로커+Redis(docker-compose)로 e2e 검증: `acc-cp3-test` 계좌로 거래 발행 →
+   `redis-cli GET feature:account:acc-cp3-test`로 정확한 JSON 확인, `TTL`로 ~30분(1781초) 확인.
+3. 같은 계좌로 두 번째 거래 발행 → 값이 **덮어써짐**(recentWindowCount 1→2, countryChanged
+   false→true) 확인, TTL도 리셋(1796초로 다시 30분 근처) 확인 — ARCHITECTURE.md 스펙 실측 일치.

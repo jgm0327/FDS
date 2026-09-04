@@ -2,8 +2,9 @@
 # application.yml의 replication-factor 기본값(3)은 다중 브로커 운영 환경 기준이므로,
 # 이 단일 브로커 compose로 검증할 때는 FDS_KAFKA_REPLICATION_FACTOR=1 로 오버라이드해서 실행한다.
 # 호스트 포트는 19092 — 로컬에 다른 프로젝트의 Kafka가 9092를 이미 점유하고 있을 수 있어 충돌을 피함.
+# CP3(Redis 피처 스토어)까지 검증하려면 FDS_REDIS_PORT=16379도 함께 오버라이드한다.
 #
-#   KAFKA_BOOTSTRAP_SERVERS=localhost:19092 FDS_KAFKA_REPLICATION_FACTOR=1 ./gradlew bootRun
+#   KAFKA_BOOTSTRAP_SERVERS=localhost:19092 FDS_KAFKA_REPLICATION_FACTOR=1 FDS_REDIS_PORT=16379 ./gradlew bootRun
 #
 services:
   kafka:
@@ -59,6 +60,20 @@ services:
       - "19090:9090"
     depends_on:
       - kafka-exporter
+
+  # CP3 — 온라인 피처 스토어 (docs/BACKEND.md CP3, docs/ARCHITECTURE.md 3번 참고).
+  # 호스트 포트는 16379 — 로컬에 이미 6379/6380 등을 쓰는 다른 프로젝트의 Redis가 떠 있을 수 있어
+  # 충돌을 피함 (kafka 19092/앱 18080과 동일한 이유, session-02 참고).
+  redis:
+    image: redis:7-alpine
+    container_name: fds-v2-redis
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   grafana:
     image: grafana/grafana:latest
