@@ -38,3 +38,12 @@ out/
 
 ### CP2 Kafka Streams local RocksDB state store ###
 /data/
+
+### CP4 PyTorch sequence model (Python) ###
+ai/**/__pycache__/
+ai/**/*.pyc
+ai/.venv/
+ai/artifacts/
+ai/model_store/
+ai/logs/
+*.mar

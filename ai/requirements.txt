@@ -1,0 +1,10 @@
+torch>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+
+# TorchServe 배포 시에만 필요 (학습/평가 자체에는 불필요 — 아래 두 줄 없이도 train.py/evaluate.py는 동작).
+# torchserve 0.12.0은 pyyaml을 requirements에 명시하지 않아 별도로 설치해야
+# `ts.torch_handler.base_handler` import가 성공한다 (ai/README.md "TorchServe 배포" 절 참고).
+torchserve>=0.12.0
+torch-model-archiver>=0.12.0
+pyyaml>=6.0
