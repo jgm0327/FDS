@@ -60,6 +60,7 @@ services:
       - "19090:9090"
     depends_on:
       - kafka-exporter
+      - redis-exporter
 
   # CP3 — 온라인 피처 스토어 (docs/BACKEND.md CP3, docs/ARCHITECTURE.md 3번 참고).
   # 호스트 포트는 16379 — 로컬에 이미 6379/6380 등을 쓰는 다른 프로젝트의 Redis가 떠 있을 수 있어
@@ -74,6 +75,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # CP3 패널 확장 — GET/SET latency, 캐시 히트율, TTL 만료, 메모리 사용량
+  # (docs/PERFORMANCE_MEASUREMENT.md CP3 표 참고). 커맨드별 latency 히스토그램
+  # (redis_latency_percentiles_usec)은 기본으로 켜져 있다 — 실측 중 --collect-command-stats라는
+  # 존재하지 않는 플래그를 시도했다가 컨테이너가 즉시 죽는 걸 보고 알게 됨 (docs/MONITORING_SETUP.md 참고).
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: fds-v2-redis-exporter
+    command:
+      - "--redis.addr=redis:6379"
+      - "--include-system-metrics"
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "19121:9121"
 
   grafana:
     image: grafana/grafana:latest

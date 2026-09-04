@@ -81,6 +81,10 @@ fds:
     # 처리한다(코드 리뷰 지적) — 넉넉하게 시작해서 실측 후 조정 (docs/BACKEND.md 핵심 설계 결정 1번과
     # 같은 원칙).
     consumer-concurrency: ${FDS_FEATURE_STORE_CONSUMER_CONCURRENCY:4}
+    # CP3 패널 확장(측정 전용) — FeatureQueryController(GET /api/features/{accountId})를 켤지 여부.
+    # 기본 false: 인증 없이 계좌 피처를 조회할 수 있는 API라 CP4가 나오기 전까지 프로덕션에 실수로
+    # 남아있으면 안 된다(코드 리뷰 지적). k6로 CP3 지표를 측정할 때만 true로 켠다.
+    query-endpoint-enabled: ${FDS_FEATURE_STORE_QUERY_ENDPOINT_ENABLED:false}
   model-serving:
     # 실제 ModelInferenceClient 연동은 다음 세션 범위. 지금은 설정값 자리만 미리 잡아둔다
     # (docs/BACKEND.md 핵심 설계 결정 4번 — REST 먼저, gRPC는 다음 단계).

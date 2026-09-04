@@ -1,0 +1,62 @@
+{
+  "title": "FDS v2 - CP3 Redis Feature Store",
+  "uid": "fds-v2-cp3",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "5s",
+  "tags": ["fds-v2", "cp3"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "GET/SET latency (p50/p99)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP3 - 1ms 이내 목표 달성 여부. redis_latency_percentiles_usec는 Redis 자체 LATENCY HISTOGRAM 기반이라 실제 명령 처리 시간을 정확히 반영한다. p95는 redis_exporter가 제공하지 않아 p50/p99/p99.9로 대체. quantile 라벨 값이 실측 중 \"50\"/\"50.0\"처럼 실행마다 다르게 나오는 걸 확인해서(같은 exporter, 같은 버전인데도 비결정적) 정규식으로 둘 다 매칭한다.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "µs" }, "overrides": [] },
+      "targets": [
+        { "expr": "redis_latency_percentiles_usec{cmd=\"get\", quantile=~\"50(\\\\.0)?\"}", "legendFormat": "GET p50" },
+        { "expr": "redis_latency_percentiles_usec{cmd=\"get\", quantile=~\"99(\\\\.0)?\"}", "legendFormat": "GET p99" },
+        { "expr": "redis_latency_percentiles_usec{cmd=\"set\", quantile=~\"50(\\\\.0)?\"}", "legendFormat": "SET p50" },
+        { "expr": "redis_latency_percentiles_usec{cmd=\"set\", quantile=~\"99(\\\\.0)?\"}", "legendFormat": "SET p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "캐시 히트율",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP3 - 피처 스토어가 실제로 재계산을 줄이는지. 이 앱은 아직 GET을 하는 컴포넌트(CP4, 모델 서빙)가 없어서 실제 조회 트래픽이 생기기 전까지는 이 패널이 비어있는 게 정상이다 — k6 CP3 시나리오가 검증용 조회 엔드포인트를 호출해서 신호를 만든다.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(redis_keyspace_hits_total[1m])) / clamp_min(sum(rate(redis_keyspace_hits_total[1m])) + sum(rate(redis_keyspace_misses_total[1m])), 1e-9)",
+          "legendFormat": "hit rate"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "TTL 만료로 인한 자동 삭제 건수",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP3 - 비활성 계좌 정리가 의도대로 동작하는지. 기본 TTL(30분)로는 데모 중 관찰하기 어려워, 검증 시엔 FDS_FEATURE_STORE_TTL_MINUTES를 짧게 오버라이드해서 확인한다 (세션 로그 참고).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "increase(redis_expired_keys_total[5m])", "legendFormat": "expired keys (5m)" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "메모리 사용량 추이",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP3 - 활성 계좌 수 증가에 따른 메모리 증가율.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "expr": "redis_memory_used_bytes", "legendFormat": "used" }
+      ]
+    }
+  ]
+}

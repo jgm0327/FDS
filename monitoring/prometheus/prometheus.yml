@@ -21,3 +21,9 @@ scrape_configs:
       - targets: ['kafka-exporter:9308']
         labels:
           service: kafka-exporter
+
+  - job_name: redis-exporter
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          service: redis-exporter
