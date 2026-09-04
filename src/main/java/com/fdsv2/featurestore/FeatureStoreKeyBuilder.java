@@ -22,4 +22,15 @@ public class FeatureStoreKeyBuilder {
     public String key(String accountId) {
         return keyPrefix + accountId;
     }
+
+    /**
+     * 최근 거래 N건(CP4 시퀀스 모델 입력용)을 담는 Redis LIST 키.
+     *
+     * 별도 config로 접미사를 빼지 않은 이유: key-prefix(운영 환경별로 바뀔 수 있는 네임스페이스)와
+     * 달리 ":recent"는 이 코드베이스 안에서만 의미를 갖는 고정 구분자라 설정으로 뺄 실익이 없다
+     * (backend/sequence-window-feature-store 세션 로그 참고).
+     */
+    public String recentKey(String accountId) {
+        return key(accountId) + ":recent";
+    }
 }

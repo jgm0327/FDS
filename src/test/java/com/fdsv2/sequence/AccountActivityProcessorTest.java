@@ -75,6 +75,9 @@ class AccountActivityProcessorTest {
         assertThat(first.amountRatio()).isEqualTo(1.0); // 첫 거래는 비교 대상 없음
         assertThat(first.lastTxGapSec()).isNull();
         assertThat(first.countryChanged()).isFalse();
+        // CP4(ai/pytorch-sequence-model)가 시퀀스 스텝 피처로 요구하는 필드 — TransactionEvent에서
+        // 그대로 통과시킨다 (backend/sequence-window-feature-store).
+        assertThat(first.merchantCategory()).isEqualTo("grocery");
 
         AccountFeatureVector second = results.get(1);
         assertThat(second.recentWindowCount()).isEqualTo(2);
@@ -153,12 +156,27 @@ class AccountActivityProcessorTest {
         assertThat(results.get(0).recentWindowCount()).isEqualTo(1);
     }
 
+    @Test
+    void 거래마다_다른_가맹점_카테고리도_그대로_통과시킨다() {
+        input.pipeInput("acc-6", event("acc-6", "10", "grocery", "KR", T0));
+        input.pipeInput("acc-6", event("acc-6", "20", "cash_advance", "KR", T0.plusSeconds(10)));
+
+        List<AccountFeatureVector> results = output.readValuesToList();
+        assertThat(results.get(0).merchantCategory()).isEqualTo("grocery");
+        assertThat(results.get(1).merchantCategory()).isEqualTo("cash_advance");
+    }
+
     private static TransactionEvent event(String accountId, String amount, String country, Instant occurredAt) {
+        return event(accountId, amount, "grocery", country, occurredAt);
+    }
+
+    private static TransactionEvent event(
+            String accountId, String amount, String merchantCategory, String country, Instant occurredAt) {
         return new TransactionEvent(
                 "tx-" + accountId + "-" + occurredAt.toEpochMilli(),
                 accountId,
                 new BigDecimal(amount),
-                "grocery",
+                merchantCategory,
                 country,
                 occurredAt);
     }

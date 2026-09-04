@@ -20,6 +20,14 @@ import org.springframework.stereotype.Component;
  *
  * 계좌ID별로 항상 같은 파티션에서 오므로(CP1), 같은 계좌의 최신 피처가 옛날 피처를 덮어쓰는 순서가
  * 보장된다 — Redis SET이 append가 아니라 "최종 상태 덮어쓰기"인 이 스펙과 정확히 맞아떨어진다.
+ *
+ * <p>최근 거래 시퀀스(CP4 연동, backend/sequence-window-feature-store): 스냅샷 SET과 별개로,
+ * 같은 JSON을 계좌별 Redis LIST({@code feature:account:{id}:recent})에도 RPUSH한다.
+ * account-feature-updates는 거래 1건당 메시지 1개이고 각 메시지의 amountRatio/lastTxGapSec/
+ * countryChanged/merchantCategory가 전부 "그 거래 자체"의 스텝 값이므로(AccountFeatureVector
+ * 참고), 이 스트림을 원문 그대로 LIST에 쌓기만 해도 CP4가 요구하는 "계좌의 최근 거래 시퀀스"가
+ * 만들어진다 — CP2 State Store나 이 리스너의 JSON-passthrough 원칙을 전혀 건드리지 않는 최소
+ * 변경으로 간극을 메운 것 (세션 로그의 "CP2/CP3 ↔ CP4 인터페이스 간극" 논의 참고).
  */
 @Slf4j
 @Component
@@ -31,6 +39,13 @@ public class AccountFeatureStoreSinkListener {
 
     @Value("${fds.feature-store.ttl-minutes}")
     private long ttlMinutes;
+
+    // CP4(ai/pytorch-sequence-model)의 MAX_SEQ_LEN과 반드시 같은 값이어야 한다 — 이 값이 더 크면
+    // Redis에 불필요하게 오래된 이력이 쌓이고, 더 작으면 CP4가 원하는 만큼의 컨텍스트를 못 준다.
+    // 두 저장소가 서로 다른 언어/레포 경계에 있어 컴파일 타임에 맞출 방법이 없으므로, 값을 바꿀
+    // 때는 항상 두 쪽을 함께 바꿔야 한다(ai/README.md에도 동일하게 문서화).
+    @Value("${fds.feature-store.recent-window-size}")
+    private int recentWindowSize;
 
     // 코드 리뷰 지적: account-feature-updates는 32개 파티션인데 concurrency 지정이 없으면 Spring
     // Kafka가 스레드 하나로 32개 파티션을 전부 처리한다 — CP1/CP2가 파티션 병렬성을 전제로 설계된
@@ -49,8 +64,18 @@ public class AccountFeatureStoreSinkListener {
             return;
         }
 
-        String redisKey = keyBuilder.key(accountId);
-        redisTemplate.opsForValue().set(redisKey, featureJson, Duration.ofMinutes(ttlMinutes));
-        log.debug("Redis 피처 스토어 갱신: key={}, ttlMinutes={}", redisKey, ttlMinutes);
+        Duration ttl = Duration.ofMinutes(ttlMinutes);
+
+        String snapshotKey = keyBuilder.key(accountId);
+        redisTemplate.opsForValue().set(snapshotKey, featureJson, ttl);
+        log.debug("Redis 피처 스토어 갱신: key={}, ttlMinutes={}", snapshotKey, ttlMinutes);
+
+        // RPUSH로 맨 뒤에 추가 후 앞쪽(오래된 것)을 잘라 최근 recentWindowSize건만 유지.
+        // 스냅샷과 마찬가지로 거래가 들어올 때마다 TTL을 리셋한다 — 활발한 계좌는 사실상 안 만료됨.
+        String recentKey = keyBuilder.recentKey(accountId);
+        redisTemplate.opsForList().rightPush(recentKey, featureJson);
+        redisTemplate.opsForList().trim(recentKey, -recentWindowSize, -1);
+        redisTemplate.expire(recentKey, ttl);
+        log.debug("Redis 최근 거래 시퀀스 갱신: key={}, recentWindowSize={}", recentKey, recentWindowSize);
     }
 }
