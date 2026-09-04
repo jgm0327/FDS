@@ -290,3 +290,52 @@ sentinel을 냄)이 섞여 있다.
    `redis-cli GET feature:account:acc-cp3-test`로 정확한 JSON 확인, `TTL`로 ~30분(1781초) 확인.
 3. 같은 계좌로 두 번째 거래 발행 → 값이 **덮어써짐**(recentWindowCount 1→2, countryChanged
    false→true) 확인, TTL도 리셋(1796초로 다시 30분 근처) 확인 — ARCHITECTURE.md 스펙 실측 일치.
+
+---
+
+## CP3 관측 확장 — `backend/redis-observability` 브랜치
+
+`docs/PERFORMANCE_MEASUREMENT.md` CP3 표(GET/SET latency, 캐시 히트율, TTL 만료 건수, 메모리
+사용량)를 Redis Exporter로 Prometheus/Grafana에 연결한다. CP1(kafka-exporter)/CP2(Kafka Streams
+지표)와 같은 패턴.
+
+### 구현 컴포넌트
+
+- `docker-compose.yml`: `oliver006/redis_exporter` 서비스 추가 (호스트 포트 19121).
+- `monitoring/prometheus/prometheus.yml`: `redis-exporter` 스크레이프 잡 추가.
+- `monitoring/grafana/provisioning/dashboards/json/cp3-redis-feature-store.json`: 4개 패널.
+- `com.fdsv2.featurestore.FeatureQueryController` — `GET /api/features/{accountId}` (측정 전용).
+- `k6/cp3-feature-lookup-test.js` — 계좌 풀을 워밍업(POST)한 뒤 반복 조회(GET)해서 캐시 히트율/
+  GET latency 신호를 만드는 시나리오. 10% 확률로 존재하지 않는 계좌를 섞어 미스도 발생시킨다.
+
+### 핵심 설계 결정
+
+1. **측정 전용 GET 엔드포인트를 이번에 추가함**: CP3 구현 세션에서는 "읽기 API는 CP4(모델 서빙)의
+   역할이라 이번 범위에서 안 만듦"이라고 명시적으로 결정했었다. 그런데 GET latency/캐시 히트율
+   지표는 애초에 GET을 하는 컴포넌트가 없으면 관측할 방법이 없다 — 그래서 이번 관측 확장
+   브랜치에서 "측정 전용"이라고 분명히 선을 그은 최소 엔드포인트(`FeatureQueryController`)를
+   추가했다. CP4가 실제 서빙 로직에서 이 역할을 대체/확장할 예정이고, 지금은 캐싱/재시도/타임아웃
+   등 실제 서빙 관심사를 전혀 다루지 않는다.
+2. **`redis_exporter`의 `--collect-command-stats` 플래그는 존재하지 않음**: 실측 중 이 플래그로
+   기동했더니 컨테이너가 즉시 죽는 걸 확인(`flag provided but not defined`). 커맨드별 latency
+   히스토그램(`redis_latency_percentiles_usec`)은 기본값으로 이미 켜져 있어서 별도 플래그가
+   필요 없었다.
+3. **p95 대신 p50/p99/p99.9**: `redis_exporter`가 제공하는 분위수가 딱 이 3개뿐이라 문서/패널
+   모두 이 값들로 통일했다 (Redis 자체 `LATENCY HISTOGRAM` 명령이 제공하는 표준 분위수).
+4. **TTL 검증은 기본값(30분) 대신 짧게 오버라이드해서 확인**: 30분을 실시간으로 기다리는 건
+   비현실적이라, 검증할 때만 `FDS_FEATURE_STORE_TTL_MINUTES=1`로 오버라이드해서 실제 만료가
+   일어나는 걸 짧은 시간 안에 관찰했다. 운영 기본값은 그대로 30분.
+
+### 완료 후 확인 방법 (실제로 수행함)
+
+1. `./gradlew test` — `FeatureQueryController`용 신규 단위 테스트 2개 포함 전체 통과.
+2. `k6 run k6/cp3-feature-lookup-test.js` 실행 중 `http_req_failed`가 의도(미스율 10%)보다 훨씬
+   높은 82%로 나온 걸 발견 → k6 `shared-iterations`의 `__ITER`가 VU별 로컬 카운터라는 걸 몰라서
+   워밍업 단계가 계좌 풀 전체를 못 채우고 일부에만 겹쳐 쓴 게 원인이었음 — warm-up을 1 VU로 고쳐서
+   해결(수정 후 미스율 9.87%로 의도한 10%와 거의 일치).
+3. `FDS_FEATURE_STORE_TTL_MINUTES=1`로 앱을 띄우고 k6 실행 → Prometheus에서
+   `redis_latency_percentiles_usec`(GET p50 ≈1µs, p99 ≈8µs), 캐시 히트율(≈90%, 의도한 미스율
+   10%와 일치), `redis_expired_keys_total`(61개 증가 — TTL 만료 실제 발생), `redis_memory_used_bytes`
+   전부 실제 값으로 확인.
+4. Grafana `FDS v2 - CP3 Redis Feature Store` 대시보드 4개 패널이 전부 실데이터로 렌더링되는 것을
+   스크린샷으로 확인.
