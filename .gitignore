@@ -38,3 +38,6 @@ out/
 
 ### CP2 Kafka Streams local RocksDB state store ###
 /data/
+
+### CP4 model-client 세션 중 로컬 TorchServe 실행이 남긴 로그(e2e 검증용, 커밋 대상 아님) ###
+/logs/
