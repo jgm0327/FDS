@@ -91,8 +91,26 @@ fds:
     # 남아있으면 안 된다(코드 리뷰 지적). k6로 CP3 지표를 측정할 때만 true로 켠다.
     query-endpoint-enabled: ${FDS_FEATURE_STORE_QUERY_ENDPOINT_ENABLED:false}
   model-serving:
-    # 실제 ModelInferenceClient 연동은 다음 세션 범위. 지금은 설정값 자리만 미리 잡아둔다
-    # (docs/BACKEND.md 핵심 설계 결정 4번 — REST 먼저, gRPC는 다음 단계).
+    # CP4 model-client (backend/model-client) — ModelInferenceClient가 실제로 이 값들을 쓴다.
+    # base-url/timeout-ms 자리는 CP1 세션에서 미리 잡아뒀던 것 그대로 재사용 (docs/BACKEND.md
+    # 핵심 설계 결정 4번 — REST 먼저, gRPC는 다음 단계).
     torchserve:
       base-url: ${TORCHSERVE_BASE_URL:http://localhost:8080}
+      # connect/read timeout 둘 다 이 값 하나로 통일한다 — RestClientTorchServeHttpCaller
+      # 클래스 javadoc 참고 (Circuit Breaker가 열리는 시점을 이 한 값만으로 예측 가능하게).
       timeout-ms: ${TORCHSERVE_TIMEOUT_MS:300}
+      # ai/pytorch_sequence_model/serving/export.py가 torch-model-archiver에 넘기는
+      # --model-name과 반드시 같아야 한다 (다르면 TorchServe가 404를 낸다).
+      model-name: ${TORCHSERVE_MODEL_NAME:fds-sequence-model}
+      circuit-breaker:
+        # 최근 sliding-window-size건 중 이 비율(%) 이상 실패하면 OPEN.
+        failure-rate-threshold: ${TORCHSERVE_CB_FAILURE_RATE_THRESHOLD:50}
+        # OPEN 상태를 유지하는 시간(초) — 이 시간 동안은 호출 자체를 안 하고 바로 폴백.
+        wait-duration-in-open-state-seconds: ${TORCHSERVE_CB_WAIT_DURATION_SECONDS:10}
+        sliding-window-size: ${TORCHSERVE_CB_SLIDING_WINDOW_SIZE:20}
+        # 이 값보다 호출 횟수가 적으면 실패율 계산 자체를 안 해서(신뢰 구간 부족), 초반에
+        # 우연히 몇 번 실패했다고 바로 OPEN되는 걸 방지한다.
+        minimum-number-of-calls: ${TORCHSERVE_CB_MINIMUM_CALLS:10}
+    # CP4 수동/부하 검증용(FraudScoreController) — 기본 false, CP3 query-endpoint-enabled와
+    # 같은 이유(인증 없는 계좌별 조회 API가 프로덕션에 실수로 남는 것 방지).
+    query-endpoint-enabled: ${FDS_MODEL_SERVING_QUERY_ENDPOINT_ENABLED:false}
