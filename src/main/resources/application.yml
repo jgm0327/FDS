@@ -137,3 +137,29 @@ fds:
     # CP4 수동/부하 검증용(FraudScoreController) — 기본 false, CP3 query-endpoint-enabled와
     # 같은 이유(인증 없는 계좌별 조회 API가 프로덕션에 실수로 남는 것 방지).
     query-endpoint-enabled: ${FDS_MODEL_SERVING_QUERY_ENDPOINT_ENABLED:false}
+  decision:
+    # CP5 — 판정 및 대응 (docs/ARCHITECTURE.md 5번). 규칙 엔진(하드룰 OR + 화이트리스트) + 모델
+    # 확률 앙상블로 최종 액션(허용/추가인증/차단)을 정한다. 자동 트리거는 FraudDecisionEventListener
+    # (CP3가 Redis 피처 스토어 갱신을 마치면 발행하는 이벤트를 구독) — 별도 활성화 플래그 없이
+    # 항상 켜져 있다. 이 섹션 나머지는 그 판정 로직의 파라미터.
+    #
+    # 화이트리스트: 이 목록의 계좌는 모델 호출 없이 즉시 허용(ALLOW)한다 — 내부/테스트 계좌 등
+    # 신뢰할 수 있다고 미리 알려진 계좌를 위한 것. 콤마로 구분한 accountId 목록.
+    whitelisted-account-ids: ${FDS_DECISION_WHITELISTED_ACCOUNT_IDS:}
+    # 하드룰 중 하나: 이 목록의 계좌는 모델 확률과 무관하게 즉시 차단(BLOCK)한다.
+    blacklisted-account-ids: ${FDS_DECISION_BLACKLISTED_ACCOUNT_IDS:}
+    # 하드룰 중 하나: 이번 거래 금액이 평소 대비 이 배율 이상이면서 동시에 국가가 바뀌었으면
+    # 모델 확률과 무관하게 즉시 차단한다 (ARCHITECTURE.md 5번 "하드룰: OR 조건으로 즉시 반영" 예시를
+    # 블랙리스트 외에 하나 더 구체화한 것).
+    hard-block-amount-ratio-threshold: ${FDS_DECISION_HARD_BLOCK_AMOUNT_RATIO_THRESHOLD:20.0}
+    ensemble:
+      # 하드룰/화이트리스트에 안 걸린 애매한 구간 전용. combinedScore = modelWeight*모델확률 +
+      # ruleWeight*규칙점수(RuleBasedFallbackScorer 재사용). 모델이 시퀀스 전체를 보고 학습된
+      # 신호라 규칙 기반 점수보다 가중치를 더 준다.
+      model-weight: ${FDS_DECISION_MODEL_WEIGHT:0.7}
+      rule-weight: ${FDS_DECISION_RULE_WEIGHT:0.3}
+      # combinedScore 임계값 — [0, low) ALLOW, [low, high) STEP_UP_AUTH(추가인증), [high, 1] BLOCK.
+      low-threshold: ${FDS_DECISION_LOW_THRESHOLD:0.3}
+      high-threshold: ${FDS_DECISION_HIGH_THRESHOLD:0.7}
+    # CP5 수동/부하 검증용(FraudDecisionController) — CP3/CP4와 같은 이유로 기본 false.
+    query-endpoint-enabled: ${FDS_DECISION_QUERY_ENDPOINT_ENABLED:false}
