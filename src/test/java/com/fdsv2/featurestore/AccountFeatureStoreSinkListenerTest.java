@@ -2,6 +2,7 @@ package com.fdsv2.featurestore;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.core.ListOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -35,11 +37,15 @@ class AccountFeatureStoreSinkListenerTest {
     @Mock
     private ListOperations<String, String> listOperations;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     private AccountFeatureStoreSinkListener listener;
 
     @BeforeEach
     void setUp() {
-        listener = new AccountFeatureStoreSinkListener(redisTemplate, new FeatureStoreKeyBuilder("feature:account:"));
+        listener = new AccountFeatureStoreSinkListener(
+                redisTemplate, new FeatureStoreKeyBuilder("feature:account:"), eventPublisher);
         ReflectionTestUtils.setField(listener, "ttlMinutes", 30L);
         ReflectionTestUtils.setField(listener, "recentWindowSize", 30);
     }
@@ -61,6 +67,7 @@ class AccountFeatureStoreSinkListenerTest {
 
         verify(redisTemplate, never()).opsForValue();
         verify(redisTemplate, never()).opsForList();
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test
@@ -92,6 +99,21 @@ class AccountFeatureStoreSinkListenerTest {
         verify(listOperations).rightPush("feature:account:acc-1:recent", featureJson);
         verify(listOperations).trim("feature:account:acc-1:recent", -30, -1);
         verify(redisTemplate).expire(eq("feature:account:acc-1:recent"), eq(Duration.ofMinutes(30)));
+    }
+
+    @Test
+    void 모든_Redis_쓰기가_끝난_후_CP5용_피처갱신_이벤트를_발행한다() {
+        // CP5(FraudDecisionEventListener)가 이 이벤트를 구독해 자동 판정을 트리거한다 —
+        // 레이스 컨디션 없이 최신 시퀀스를 읽으려면 반드시 SET/RPUSH/TRIM/EXPIRE 이후에 발행돼야
+        // 한다(순서 자체는 이 테스트만으로 강제할 수 없지만, 최소한 이벤트가 나가는지는 검증한다).
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(redisTemplate.opsForList()).thenReturn(listOperations);
+        String featureJson = "{\"accountId\":\"acc-1\",\"recentWindowCount\":1}";
+
+        listener.onFeatureUpdate(new ConsumerRecord<>("account-feature-updates", 0, 0, "acc-1", featureJson));
+
+        verify(eventPublisher).publishEvent(argThat((FeatureStoreUpdatedEvent event) ->
+                event.accountId().equals("acc-1") && event.featureJson().equals(featureJson)));
     }
 
     @Test

@@ -1,10 +1,12 @@
 package com.fdsv2.featurestore;
 
 import java.time.Duration;
+import java.time.Instant;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
@@ -28,6 +30,11 @@ import org.springframework.stereotype.Component;
  * 참고), 이 스트림을 원문 그대로 LIST에 쌓기만 해도 CP4가 요구하는 "계좌의 최근 거래 시퀀스"가
  * 만들어진다 — CP2 State Store나 이 리스너의 JSON-passthrough 원칙을 전혀 건드리지 않는 최소
  * 변경으로 간극을 메운 것 (세션 로그의 "CP2/CP3 ↔ CP4 인터페이스 간극" 논의 참고).
+ *
+ * <p>CP5 연동(backend/decision-ensemble): Redis 쓰기가 전부 끝난 직후 {@link FeatureStoreUpdatedEvent}를
+ * 발행한다 — CP5의 {@code FraudDecisionEventListener}가 이 이벤트를 구독해 자동 판정을 트리거한다.
+ * 이 리스너는 이벤트를 "발행"만 하고 구독자가 누구인지, 몇 명인지 몰라도 된다 (자세한 이유는
+ * {@link FeatureStoreUpdatedEvent} 클래스 javadoc 참고).
  */
 @Slf4j
 @Component
@@ -36,6 +43,7 @@ public class AccountFeatureStoreSinkListener {
 
     private final StringRedisTemplate redisTemplate;
     private final FeatureStoreKeyBuilder keyBuilder;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Value("${fds.feature-store.ttl-minutes}")
     private long ttlMinutes;
@@ -77,5 +85,12 @@ public class AccountFeatureStoreSinkListener {
         redisTemplate.opsForList().trim(recentKey, -recentWindowSize, -1);
         redisTemplate.expire(recentKey, ttl);
         log.debug("Redis 최근 거래 시퀀스 갱신: key={}, recentWindowSize={}", recentKey, recentWindowSize);
+
+        // CP5(판정 및 대응) 자동 트리거 — 위 Redis 쓰기가 전부 끝난 "이후"에 발행해야, CP5가 모델
+        // 호출 시 이번 거래까지 반영된 최신 시퀀스를 읽는다(클래스 javadoc/FeatureStoreUpdatedEvent
+        // 참고). 발행 자체는 동기 호출이라 구독자(CP5)의 예외가 여기로 전파될 수 있는데, 그건 CP5
+        // 쪽 책임 — CP5 리스너가 자기 예외를 삼키지 못하면 이 레코드가 불필요하게 재시도(중복
+        // RPUSH)될 위험이 있으므로 CP5 쪽에서 반드시 격리해야 한다(FraudDecisionEventListener 참고).
+        eventPublisher.publishEvent(new FeatureStoreUpdatedEvent(accountId, featureJson, Instant.now()));
     }
 }
