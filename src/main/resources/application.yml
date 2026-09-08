@@ -126,6 +126,14 @@ fds:
         # (ModelClientConfig 클래스 javadoc, 세션 로그 참고). 작게 잡아서 회복 시도의 부하 자체를
         # 줄인다.
         permitted-calls-in-half-open-state: ${TORCHSERVE_CB_PERMITTED_CALLS_HALF_OPEN:3}
+      bulkhead:
+        # (backend/model-client-concurrency-fix) ModelClientConfig 클래스 javadoc 참고 — k6 10 VU
+        # 동시 부하를 완전히 새로 띄운 환경에서 딱 한 번 재현한 결과, TorchServe 단일 워커
+        # (minWorkers=maxWorkers=1)가 원인으로 확정됐다. 이 값은 실제 배포된 TorchServe 워커 수와
+        # 반드시 같이 맞춰야 한다 — ai/README.md TorchServe 배포 절의 워커 수 설정 참고. 기본값 4는
+        # 이번 재검증에서 실측으로 확인한 워커 수(4)에 맞춘 것이며, 워커 수를 바꾸면 이 값도 같이
+        # 바꿔야 한다.
+        max-concurrent-calls: ${TORCHSERVE_BULKHEAD_MAX_CONCURRENT_CALLS:4}
     # CP4 수동/부하 검증용(FraudScoreController) — 기본 false, CP3 query-endpoint-enabled와
     # 같은 이유(인증 없는 계좌별 조회 API가 프로덕션에 실수로 남는 것 방지).
     query-endpoint-enabled: ${FDS_MODEL_SERVING_QUERY_ENDPOINT_ENABLED:false}

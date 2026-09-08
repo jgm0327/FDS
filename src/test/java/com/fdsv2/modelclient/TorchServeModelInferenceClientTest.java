@@ -6,6 +6,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -37,6 +39,7 @@ class TorchServeModelInferenceClientTest {
     private TorchServeHttpCaller httpCaller;
 
     private CircuitBreaker circuitBreaker;
+    private Bulkhead bulkhead;
     private SimpleMeterRegistry meterRegistry;
     private TorchServeModelInferenceClient client;
 
@@ -51,9 +54,13 @@ class TorchServeModelInferenceClientTest {
                 .waitDurationInOpenState(Duration.ofMinutes(1))
                 .build();
         circuitBreaker = CircuitBreaker.of("test-torchserve", config);
+        // 기존 CircuitBreaker 단독 시나리오 테스트가 그대로 통과하도록, 이 테스트에서는 동시 호출
+        // 제한에 걸릴 일이 없게 넉넉하게(10) 잡는다 — Bulkhead 자체의 거절 동작은
+        // TorchServeModelInferenceClientConcurrencyTest에서 별도로 검증한다.
+        bulkhead = Bulkhead.of("test-torchserve", BulkheadConfig.custom().maxConcurrentCalls(10).build());
         meterRegistry = new SimpleMeterRegistry();
         client = new TorchServeModelInferenceClient(
-                sequenceReader, fallbackScorer, httpCaller, circuitBreaker, meterRegistry);
+                sequenceReader, fallbackScorer, httpCaller, circuitBreaker, bulkhead, meterRegistry);
     }
 
     @Test

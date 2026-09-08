@@ -1,6 +1,7 @@
 package com.fdsv2.modelclient;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -23,6 +24,15 @@ import org.springframework.stereotype.Component;
  * 오픈 발생률" 판단 근거. {@code fds.fallback.scorer.latency} 타이머는 같은 표의 "폴백 발생 시
  * 규칙 기반 스코어 응답 latency" 행에 대응 — 자체 계측이라고 명시된 항목이라 Resilience4j 지표가
  * 아니라 직접 Timer로 감쌌다.
+ *
+ * <p>(backend/model-client-concurrency-fix) {@link Bulkhead}를 {@link CircuitBreaker} 바깥쪽에
+ * 감싸는 순서 — {@code bulkhead.executeSupplier(() -> circuitBreaker.executeSupplier(...))}.
+ * Bulkhead가 먼저 동시 호출 수를 걸러내므로, 이미 가득 찬 상태에서 거절된 호출(BulkheadFullException)은
+ * CircuitBreaker.executeSupplier 자체가 호출되지 않아 CircuitBreaker의 성공/실패 통계에 전혀
+ * 잡히지 않는다 — ModelClientConfig 클래스 javadoc "Bulkhead를 추가로 얹은 이유" 참고. 반대
+ * 순서(CircuitBreaker가 바깥)로 하면 Bulkhead 거절도 CircuitBreaker의 "실패"로 집계되어, 정작
+ * TorchServe가 멀쩡한데도 자기 자신의 동시성 제한 때문에 서킷이 열리는 또 다른 자기 참조적
+ * 문제가 생긴다.
  */
 @Slf4j
 @Component
@@ -32,6 +42,7 @@ public class TorchServeModelInferenceClient implements ModelInferenceClient {
     private final RuleBasedFallbackScorer fallbackScorer;
     private final TorchServeHttpCaller httpCaller;
     private final CircuitBreaker circuitBreaker;
+    private final Bulkhead bulkhead;
     private final MeterRegistry meterRegistry;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -40,11 +51,13 @@ public class TorchServeModelInferenceClient implements ModelInferenceClient {
             RuleBasedFallbackScorer fallbackScorer,
             TorchServeHttpCaller httpCaller,
             CircuitBreaker torchServeCircuitBreaker,
+            Bulkhead torchServeBulkhead,
             MeterRegistry meterRegistry) {
         this.sequenceReader = sequenceReader;
         this.fallbackScorer = fallbackScorer;
         this.httpCaller = httpCaller;
         this.circuitBreaker = torchServeCircuitBreaker;
+        this.bulkhead = torchServeBulkhead;
         this.meterRegistry = meterRegistry;
     }
 
@@ -54,12 +67,14 @@ public class TorchServeModelInferenceClient implements ModelInferenceClient {
         RawFeatureStep latestStep = steps.isEmpty() ? null : steps.get(steps.size() - 1);
 
         try {
-            double probability = circuitBreaker.executeSupplier(() -> callTorchServe(accountId, steps));
+            double probability = bulkhead.executeSupplier(
+                    () -> circuitBreaker.executeSupplier(() -> callTorchServe(accountId, steps)));
             meterRegistry.counter("fds.fraud.score.count", "source", FraudScore.SOURCE_MODEL).increment();
             return new FraudScore(accountId, probability, FraudScore.SOURCE_MODEL);
         } catch (Exception e) {
-            // CallNotPermittedException(서킷 오픈)부터 타임아웃/연결 실패/응답 파싱 실패까지 전부
-            // 여기로 모인다 — 위 클래스 javadoc "실패로 간주하는 범위" 참고.
+            // BulkheadFullException(동시 호출 한도 초과)/CallNotPermittedException(서킷 오픈)부터
+            // 타임아웃/연결 실패/응답 파싱 실패까지 전부 여기로 모인다 — 위 클래스 javadoc
+            // "실패로 간주하는 범위" 참고.
             log.warn("TorchServe 호출 실패, 규칙 기반 폴백으로 전환: accountId={}, cause={}",
                     accountId, e.toString());
             double fallbackProbability = Timer.builder("fds.fallback.scorer.latency")

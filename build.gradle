@@ -48,6 +48,13 @@ dependencies {
 	// 직접 등록한다 — resilience4j-circuitbreaker 코어 모듈만 쓰기로 한 결정(build.gradle 위 주석)과
 	// 같은 이유.
 	implementation 'io.github.resilience4j:resilience4j-micrometer:2.2.0'
+	// (backend/model-client-concurrency-fix) k6 10 VU 동시 부하로 실측한 문제: TorchServe
+	// 워커 수보다 훨씬 많은 동시 요청을 그대로 흘려보내면, 초과분이 단일/소수 워커 뒤에서 큐잉되며
+	// timeout-ms(300ms)를 넘겨 "가짜 실패"로 서킷브레이커에 잡힌다 — TorchServe/모델은 멀쩡한데
+	// 앱이 스스로 과부하를 만든 것. Bulkhead로 TorchServe에 동시에 흘려보내는 호출 수 자체를
+	// 실제 배포된 워커 수만큼으로 제한해서, 초과분은 TorchServe까지 가지도 않고 즉시 폴백으로
+	// 빠지게 한다(ModelClientConfig 클래스 javadoc, docs/sessions 세션 로그 참고).
+	implementation 'io.github.resilience4j:resilience4j-bulkhead:2.2.0'
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'
 	testImplementation 'org.springframework.boot:spring-boot-starter-actuator-test'
