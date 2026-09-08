@@ -115,6 +115,27 @@ torchserve --stop
 CP4 성능 측정 표(추론 latency p50/p95/p99, 서킷브레이커 폴백 전환)는 k6 부하 + Prometheus
 연동이 필요해 이번 세션 범위 밖 — 다음 세션 TODO.
 
+### 워커 수 — 기본값(1)으로는 k6 10 VU 동시 부하를 못 버틴다 (backend/model-client-concurrency-fix 실측)
+
+위 `torchserve --start` 명령은 워커 수를 지정하지 않으면 `minWorkers=maxWorkers=1`로 뜬다
+(`GET http://127.0.0.1:8081/models/fds-sequence-model`로 확인 가능). 완전히 새로 띄운 환경에서
+k6 10 VU 동시 부하를 딱 한 번 실행해 실측한 결과, TorchServe 프로세스 자체는 한 번도 죽지
+않았는데도 45초 동안 요청의 26%가 Circuit Breaker에 실패로 잡혀 FALLBACK으로 전환됐다 —
+워커 1개가 동시 요청을 순차 처리하며 대기시간이 쌓이고, 그중 일부가
+`fds.model-serving.torchserve.timeout-ms`(300ms)를 넘겼기 때문이다. 로컬에서 동시성 검증을
+하려면 기동 직후 관리 API로 워커를 늘려야 한다:
+
+```bash
+curl -X PUT "http://127.0.0.1:8081/models/fds-sequence-model?min_worker=4&max_worker=4&synchronous=true"
+```
+
+`backend/model-client`의 `fds.model-serving.torchserve.bulkhead.max-concurrent-calls`
+기본값(4)이 이 값과 짝을 이룬다 — 워커 수를 바꾸면 그 설정도 같이 바꿔야 한다
+(`ModelClientConfig` 클래스 javadoc 참고). 운영 배포 시에는 이 값을 컨테이너 기동 커맨드나
+`config.properties`(`default_workers_per_model`)에 고정해서, 매번 수동으로 관리 API를 호출하지
+않아도 되게 해야 한다 — 이번 세션은 로컬 실측 검증까지만 다뤘고, 이 자동화는 범위 밖으로
+남겨둔다.
+
 ## 백엔드 연동 시 남는 숙제 — CP2/CP3가 스텝별 원본 이력을 안 남긴다
 
 이 모델은 계좌의 "최근 거래 각각"을 스텝으로 받는데, 현재 CP2(`AccountFeatureVector`)/CP3
