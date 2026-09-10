@@ -2,6 +2,8 @@ package com.fdsv2.modelclient;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -63,8 +65,21 @@ public class TorchServeModelInferenceClient implements ModelInferenceClient {
 
     @Override
     public FraudScore predict(String accountId) {
-        List<RawFeatureStep> steps = sequenceReader.readRecentSteps(accountId);
-        RawFeatureStep latestStep = steps.isEmpty() ? null : steps.get(steps.size() - 1);
+        // 코드 리뷰 지적: 이 조회가 try 밖에 있으면 Redis 장애 시(동시 부하로 커넥션 풀이
+        // 고갈되는 경우 등, 이 클래스가 Bulkhead로 막으려는 것과 같은 종류의 부하 상황에서 실제로
+        // 벌어질 수 있음) 이 클래스의 핵심 계약("predict()는 항상 FraudScore를 반환하며 예외를
+        // 던지지 않는다")이 깨진다. try 안으로 옮기고, 실패하면 latestStep 없이(null) 곧바로
+        // 규칙 기반 폴백으로 빠진다.
+        List<RawFeatureStep> steps;
+        RawFeatureStep latestStep;
+        try {
+            steps = sequenceReader.readRecentSteps(accountId);
+            latestStep = steps.isEmpty() ? null : steps.get(steps.size() - 1);
+        } catch (Exception e) {
+            log.warn("최근 거래 시퀀스 조회 실패, 규칙 기반 폴백으로 전환: accountId={}, cause={}",
+                    accountId, e.toString());
+            return fallback(accountId, null, "sequence_read_error");
+        }
 
         try {
             double probability = bulkhead.executeSupplier(
@@ -72,19 +87,39 @@ public class TorchServeModelInferenceClient implements ModelInferenceClient {
             meterRegistry.counter("fds.fraud.score.count", "source", FraudScore.SOURCE_MODEL).increment();
             return new FraudScore(accountId, probability, FraudScore.SOURCE_MODEL);
         } catch (Exception e) {
-            // BulkheadFullException(동시 호출 한도 초과)/CallNotPermittedException(서킷 오픈)부터
-            // 타임아웃/연결 실패/응답 파싱 실패까지 전부 여기로 모인다 — 위 클래스 javadoc
-            // "실패로 간주하는 범위" 참고.
-            log.warn("TorchServe 호출 실패, 규칙 기반 폴백으로 전환: accountId={}, cause={}",
-                    accountId, e.toString());
-            double fallbackProbability = Timer.builder("fds.fallback.scorer.latency")
-                    .description("docs/PERFORMANCE_MEASUREMENT.md CP4 - 폴백 발생 시 규칙 기반 스코어 응답 latency")
-                    .publishPercentileHistogram()
-                    .register(meterRegistry)
-                    .record(() -> fallbackScorer.score(latestStep));
-            meterRegistry.counter("fds.fraud.score.count", "source", FraudScore.SOURCE_FALLBACK).increment();
-            return new FraudScore(accountId, fallbackProbability, FraudScore.SOURCE_FALLBACK);
+            // 코드 리뷰 지적: 이 catch가 BulkheadFullException(동시 호출 한도 초과)/
+            // CallNotPermittedException(서킷 오픈)부터 타임아웃/연결 실패/응답 파싱 실패까지 전부
+            // 뭉뚱그려서(위 클래스 javadoc "실패로 간주하는 범위"), 정작 Bulkhead/CircuitBreaker를
+            // 나눠서 얹은 목적("용량 초과로 인한 거절"과 "TorchServe의 실제 실패"를 구분)이 운영자가
+            // 보는 로그/폴백 사유 태그에서는 다시 합쳐진다. 예외 타입으로 사유를 구분해서 태그를
+            // 남긴다 — 동시성 원인 조사가 다음에 또 필요할 때 CircuitBreaker 통계까지 안 뒤져도
+            // 이 태그만으로 원인을 좁힐 수 있게.
+            String reason = fallbackReason(e);
+            log.warn("TorchServe 호출 실패, 규칙 기반 폴백으로 전환: accountId={}, reason={}, cause={}",
+                    accountId, reason, e.toString());
+            return fallback(accountId, latestStep, reason);
         }
+    }
+
+    private static String fallbackReason(Exception e) {
+        if (e instanceof BulkheadFullException) {
+            return "bulkhead_full";
+        }
+        if (e instanceof CallNotPermittedException) {
+            return "circuit_open";
+        }
+        return "torchserve_error";
+    }
+
+    private FraudScore fallback(String accountId, RawFeatureStep latestStep, String reason) {
+        double fallbackProbability = Timer.builder("fds.fallback.scorer.latency")
+                .description("docs/PERFORMANCE_MEASUREMENT.md CP4 - 폴백 발생 시 규칙 기반 스코어 응답 latency")
+                .publishPercentileHistogram()
+                .register(meterRegistry)
+                .record(() -> fallbackScorer.score(latestStep));
+        meterRegistry.counter("fds.fraud.score.count", "source", FraudScore.SOURCE_FALLBACK, "reason", reason)
+                .increment();
+        return new FraudScore(accountId, fallbackProbability, FraudScore.SOURCE_FALLBACK);
     }
 
     private double callTorchServe(String accountId, List<RawFeatureStep> steps) {
