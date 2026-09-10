@@ -86,6 +86,21 @@ class EnsembleFraudDecisionServiceTest {
     }
 
     @Test
+    void 모델확률이_NaN이면_BLOCK이_아니라_STEP_UP_AUTH로_완충한다() {
+        // 코드 리뷰 지적 회귀 테스트: combinedScore가 NaN이면 "<" 비교가 전부 false로 평가돼
+        // 조용히 BLOCK으로 떨어지던 문제. "판단 불가"를 확정적 차단과 구분해서 완충 처리하는지 검증.
+        EnsembleFraudDecisionService service = service(0.7, 0.3, 0.3, 0.7);
+        RawFeatureStep step = new RawFeatureStep("acc-nan", 1, 1.0, null, false, "GROCERY");
+        when(ruleEngine.evaluate("acc-nan", step)).thenReturn(new RuleVerdict(null, 0.1, List.of()));
+        when(modelInferenceClient.predict("acc-nan"))
+                .thenReturn(new FraudScore("acc-nan", Double.NaN, FraudScore.SOURCE_MODEL));
+
+        FraudDecision decision = service.decide("acc-nan", step);
+
+        assertThat(decision.action()).isEqualTo(Action.STEP_UP_AUTH);
+    }
+
+    @Test
     void 서킷브레이커_폴백으로_나온_모델점수도_그대로_앙상블에_반영된다() {
         // ModelInferenceClient는 절대 예외를 던지지 않고, 실패 시 FALLBACK source로 스코어를 낸다
         // (해당 클래스 계약) — 여기서는 그 반환값을 있는 그대로 신뢰하고 앙상블에 반영하는지만 본다.

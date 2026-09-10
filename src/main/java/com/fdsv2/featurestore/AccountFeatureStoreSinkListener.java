@@ -88,9 +88,15 @@ public class AccountFeatureStoreSinkListener {
 
         // CP5(판정 및 대응) 자동 트리거 — 위 Redis 쓰기가 전부 끝난 "이후"에 발행해야, CP5가 모델
         // 호출 시 이번 거래까지 반영된 최신 시퀀스를 읽는다(클래스 javadoc/FeatureStoreUpdatedEvent
-        // 참고). 발행 자체는 동기 호출이라 구독자(CP5)의 예외가 여기로 전파될 수 있는데, 그건 CP5
-        // 쪽 책임 — CP5 리스너가 자기 예외를 삼키지 못하면 이 레코드가 불필요하게 재시도(중복
-        // RPUSH)될 위험이 있으므로 CP5 쪽에서 반드시 격리해야 한다(FraudDecisionEventListener 참고).
-        eventPublisher.publishEvent(new FeatureStoreUpdatedEvent(accountId, featureJson, Instant.now()));
+        // 참고). 구독자(CP5)는 전용 스레드풀에서 비동기로 처리하고 자기 예외를 스스로 삼키지만
+        // (FraudDecisionEventListener 참고), 이 publishEvent 호출 자체(리스너 조회/디스패치)에서
+        // 예외가 날 가능성까지 방어적으로 한 번 더 막는다 — 여기서 예외가 새면 이미 성공한 Redis
+        // 쓰기가 있는 레코드가 DefaultErrorHandler에 의해 불필요하게 재시도(중복 RPUSH)될 수 있다.
+        try {
+            eventPublisher.publishEvent(new FeatureStoreUpdatedEvent(accountId, featureJson, Instant.now()));
+        } catch (Exception e) {
+            log.warn("CP5 자동 판정 트리거 이벤트 발행 실패 — Redis 쓰기는 이미 완료됨, 판정만 스킵: accountId={}",
+                    accountId, e);
+        }
     }
 }
