@@ -11,7 +11,7 @@ package com.fdsv2.transaction;
  * 같은 문자열이 항상 같은 해시로 같은 파티션에 가므로, "같은 계좌 -> 같은 파티션" 순서 보장
  * (docs/ARCHITECTURE.md 1번)은 그대로 유지된다. CP2는 이 경우 샤드가 1개뿐인 것으로 취급해서
  * 병합 로직이 기존(샤드 없던 시절) 단일 계좌 집계와 수학적으로 동일한 결과를 낸다
- * (AccountActivityMergeProcessorTest 참고).
+ * ({@code com.fdsv2.sequence.SaltedAccountAggregationTest} 참고).
  */
 public record AccountShardKey(String accountId, int shardIndex) {
 

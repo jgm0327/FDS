@@ -65,6 +65,14 @@ public class TransactionEventProducer {
             @Value("${fds.kafka.transaction-events.salting.high-traffic-account-ids:}")
                     String highTrafficAccountIdsCsv,
             @Value("${fds.kafka.transaction-events.salting.shard-count:8}") int shardCount) {
+        // 코드 리뷰 지적: shard-count가 0 이하로 설정되면(오타, "0으로 끄려는" 시도 등)
+        // ThreadLocalRandom.nextInt(shardCount)가 IllegalArgumentException을 던지는데, 이게
+        // publish() 호출 시점(요청 처리 중)에야 터져서 모든 거래 발행이 500으로 실패한다 —
+        // 애플리케이션 기동 시점에 미리 fail-fast로 막는다.
+        if (shardCount <= 0) {
+            throw new IllegalArgumentException(
+                    "fds.kafka.transaction-events.salting.shard-count는 1 이상이어야 한다: " + shardCount);
+        }
         this.kafkaTemplate = kafkaTemplate;
         this.meterRegistry = meterRegistry;
         this.topicName = topicName;
