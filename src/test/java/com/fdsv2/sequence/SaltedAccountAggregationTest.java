@@ -63,6 +63,32 @@ class SaltedAccountAggregationTest {
     }
 
     @Test
+    void 트래픽이_끊긴_샤드의_옛_windowCount는_윈도우_밖으로_밀려나면_더_이상_합산되지_않는다() {
+        // 코드 리뷰 지적 회귀 테스트: 샤드 0이 거래 2건을 받고(windowCount=2) 조용해진 뒤, 샤드 1만
+        // 계속 거래를 받으면 — 샤드 0의 "옛" windowCount가 영원히 합계에 남아 계좌 전체를 계속
+        // 부풀리면 안 된다. 5분 뒤 시점에는 샤드 0의 마지막 보고가 이미 윈도우 밖이라 0으로
+        // 취급돼야 한다.
+        input.pipeInput(AccountShardKey.format("acc-stale", 0), event("acc-stale", "10", "KR", T0));
+        input.pipeInput(AccountShardKey.format("acc-stale", 0),
+                event("acc-stale", "10", "KR", T0.plusSeconds(1))); // 샤드 0 windowCount=2, 이후 조용해짐
+        input.pipeInput(AccountShardKey.format("acc-stale", 1),
+                event("acc-stale", "10", "KR", T0.plusSeconds(2))); // 이 시점엔 샤드 0이 아직 신선함 -> 합계 3
+
+        List<AccountFeatureVector> resultsSoFar = output.readValuesToList();
+        assertThat(resultsSoFar.get(2).recentWindowCount()).isEqualTo(3);
+
+        // 10분 뒤(윈도우 5분을 훌쩍 넘김) 샤드 1에 새 거래 — 샤드 0의 마지막 보고(T0+1s)는 이제
+        // [T0+5min, T0+10min] 윈도우 밖이라 제외되고, 샤드 1 자신도 자기 예전 거래(T0+2s)를 이미
+        // 윈도우 밖으로 트리밍했을 것이므로 이번 거래 1건만 남아야 한다.
+        input.pipeInput(AccountShardKey.format("acc-stale", 1),
+                event("acc-stale", "10", "KR", T0.plus(Duration.ofMinutes(10))));
+
+        List<AccountFeatureVector> allResults = output.readValuesToList();
+        AccountFeatureVector latest = allResults.get(allResults.size() - 1);
+        assertThat(latest.recentWindowCount()).isEqualTo(1);
+    }
+
+    @Test
     void 서로_다른_샤드로_들어온_같은_계좌_거래의_recentWindowCount는_샤드_합산이다() {
         // acc-hot이 3개 샤드에 나뉘어 들어온다 — 실제 프로듀서는 무작위로 나누지만, 테스트는
         // 결정적으로 각 샤드에 1건씩 보내서 "3건 = 합계 3"을 검증한다.

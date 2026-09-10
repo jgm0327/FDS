@@ -30,8 +30,8 @@ import org.apache.kafka.streams.state.KeyValueStore;
  *
  * <p>일반 계좌(고빈도로 지정 안 됨)는 항상 샤드가 1개("accountId#0")뿐이라, 이 샤드의 부분
  * 상태가 곧 그 계좌의 전체 상태와 같다 — Stage 2에서 병합해도 결과가 달라지지 않는다
- * (AccountActivityMergeProcessorTest, 그리고 기존 AccountActivityProcessorTest가 그대로
- * 회귀 테스트로 통과하는 것으로 검증).
+ * ({@code SaltedAccountAggregationTest}, 그리고 기존 {@code AccountActivityProcessorTest}가
+ * 그대로 회귀 테스트로 통과하는 것으로 검증).
  */
 @Slf4j
 public class ShardedAccountActivityProcessor

@@ -204,7 +204,8 @@ public class SequenceAggregationTopologyConfig {
                                 new JsonSerde<>(PartialAccountFeatureVector.class))
                         .withName(PARTIAL_REPARTITION_NAME))
                 // Stage 2: 계좌 단위로 샤드들을 병합해서 최종 AccountFeatureVector 계산.
-                .processValues(() -> new AccountActivityMergeProcessor(MERGE_STORE_NAME), MERGE_STORE_NAME)
+                .processValues(() -> new AccountActivityMergeProcessor(MERGE_STORE_NAME, recentWindow),
+                        MERGE_STORE_NAME)
                 .to(outputTopic, Produced.with(Serdes.String(), new JsonSerde<>(AccountFeatureVector.class)));
 
         return transactions;
