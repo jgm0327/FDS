@@ -6,6 +6,7 @@ import com.fdsv2.modelclient.RawFeatureStep;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
 /**
@@ -20,10 +21,15 @@ import org.springframework.stereotype.Component;
  * 읽기({@code ModelInferenceClient} → Redis LIST 읽기) 사이에 <b>레이스 컨디션</b>이 생긴다 —
  * 서로 다른 컨슈머 그룹은 같은 레코드를 거의 동시에 넘겨받을 뿐 순서를 보장하지 않으므로, CP5가
  * 이번 거래의 RPUSH보다 먼저 모델을 호출하면 "방금 들어온 거래가 반영되지 않은" 시퀀스로 판정하게
- * 된다. Spring의 {@link EventListener}는(별도 TaskExecutor 설정이 없는 한) 발행자와 같은 스레드에서
- * 동기 호출되므로, CP3가 Redis 쓰기를 전부 마친 "이후"에 이벤트를 발행하면 이 레이스가 애초에
- * 생기지 않는다 — 이번엔 정확성이 "단계별 독립 컨슈머 그룹"이라는 기존 패턴의 일관성보다 중요하다고
- * 판단했다(세션 로그 참고).
+ * 된다. CP3가 Redis 쓰기를 전부 마친 "이후"에 이벤트를 발행하면 이 레이스가 애초에 생기지 않는다
+ * — 이번엔 정확성이 "단계별 독립 컨슈머 그룹"이라는 기존 패턴의 일관성보다 중요하다고 판단했다
+ * (세션 로그 참고).
+ *
+ * <p><b>코드 리뷰 반영 — 전용 스레드풀로 비동기 실행</b>: 처음엔 이 메서드가 기본 {@link EventListener}
+ * (동기, 발행자와 같은 스레드)였는데, 그러면 매 거래마다 TorchServe 호출이 CP3의 Kafka 컨슈머
+ * 스레드를 막아 컨슈머 랙/리밸런싱 위험을 낳는다는 지적을 받았다. {@link DecisionAsyncConfig}의
+ * 전용 스레드풀({@code fraudDecisionExecutor})로 옮겨서 이 블로킹을 컨슈머 스레드에서 분리했다 —
+ * 위 레이스 방지 전제(발행 시점이 RPUSH 이후)는 처리 스레드가 바뀌어도 그대로 유지된다.
  *
  * <p>이 트레이드오프의 비용: CP3 파일에 몇 줄(이벤트 발행)이 추가됐다 — 다만 그건 "무엇을
  * 구독하는지 몰라도 되는" 범용 확장 지점({@code ApplicationEventPublisher})이라, CP5의 판정
@@ -42,6 +48,7 @@ public class FraudDecisionEventListener {
     private final FraudDecisionService fraudDecisionService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    @Async("fraudDecisionExecutor")
     @EventListener
     public void onFeatureStoreUpdated(FeatureStoreUpdatedEvent event) {
         try {

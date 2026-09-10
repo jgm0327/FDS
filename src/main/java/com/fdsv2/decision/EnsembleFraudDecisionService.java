@@ -77,6 +77,14 @@ public class EnsembleFraudDecisionService implements FraudDecisionService {
     }
 
     private Action toAction(double combinedScore) {
+        // 코드 리뷰 지적: combinedScore가 NaN이면(예: TorchServe가 이상값을 내려보낸 경우) 아래
+        // "<" 비교가 전부 false로 평가되어 조용히 BLOCK으로 떨어진다 — 이 값이 "고위험으로 확인된
+        // BLOCK"인지 "판단 불가"인지 구분이 안 된다. 판단 불가 상태를 확정적 차단(BLOCK)보다는
+        // 추가인증(STEP_UP_AUTH)으로 완충하는 게 3단계 액션의 취지("애매한 구간 완충")에 더 맞는다.
+        if (Double.isNaN(combinedScore)) {
+            log.warn("CP5 combinedScore가 NaN — 모델 응답 이상 의심, STEP_UP_AUTH로 완충 처리");
+            return Action.STEP_UP_AUTH;
+        }
         if (combinedScore < lowThreshold) {
             return Action.ALLOW;
         }
