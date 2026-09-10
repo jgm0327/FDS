@@ -3,6 +3,10 @@ package com.fdsv2.decision;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fdsv2.featurestore.FeatureStoreUpdatedEvent;
 import com.fdsv2.modelclient.RawFeatureStep;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import java.time.Duration;
+import java.time.Instant;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
@@ -39,6 +43,15 @@ import org.springframework.stereotype.Component;
  * 새면 CP3의 Kafka 리스너 스레드까지 예외가 전파되어, 이미 성공한 Redis 쓰기가 있는 레코드가
  * {@code FeatureStoreKafkaConfig}의 {@code DefaultErrorHandler}에 의해 불필요하게 재시도(중복
  * RPUSH 등)될 수 있다.
+ *
+ * <p>(backend/decision-ensemble-observability) {@code fds.decision.e2e.latency}는
+ * docs/PERFORMANCE_MEASUREMENT.md CP5 "End-to-end latency (수집→판정 전체)" — 정확히는
+ * {@link FeatureStoreUpdatedEvent#occurredAt()}(CP3가 Redis 쓰기를 전부 마친 시점)부터 이
+ * 리스너가 판정을 끝낸 시점까지다. CP1(수집)~CP2(집계)~CP3(저장) 구간은 포함하지 않는다 — 그
+ * 구간의 latency는 각자의 -observability 대시보드(CP1/CP2)에서 이미 측정 중이고, 여기서 다시
+ * 재는 건 중복이다. 대신 이 지표는 "전용 스레드풀({@code fraudDecisionExecutor})에 판정이 큐잉된
+ * 시간까지 포함한, CP5 자체의 실제 체감 지연"을 정확히 보여준다 — 풀이 포화되면 이 값이 늘어나는
+ * 것으로 드러난다.
  */
 @Slf4j
 @Component
@@ -46,6 +59,7 @@ import org.springframework.stereotype.Component;
 public class FraudDecisionEventListener {
 
     private final FraudDecisionService fraudDecisionService;
+    private final MeterRegistry meterRegistry;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Async("fraudDecisionExecutor")
@@ -54,8 +68,19 @@ public class FraudDecisionEventListener {
         try {
             RawFeatureStep latestStep = objectMapper.readValue(event.featureJson(), RawFeatureStep.class);
             fraudDecisionService.decide(event.accountId(), latestStep);
+            recordE2eLatency(event);
         } catch (Exception e) {
             log.warn("CP5 자동 판정 실패, 건너뜀: accountId={}, cause={}", event.accountId(), e.toString());
         }
+    }
+
+    private void recordE2eLatency(FeatureStoreUpdatedEvent event) {
+        Duration elapsed = Duration.between(event.occurredAt(), Instant.now());
+        Timer.builder("fds.decision.e2e.latency")
+                .description("docs/PERFORMANCE_MEASUREMENT.md CP5 - End-to-end latency"
+                        + " (CP3 Redis 쓰기 완료 -> CP5 판정 완료, 큐잉 시간 포함)")
+                .publishPercentileHistogram()
+                .register(meterRegistry)
+                .record(elapsed);
     }
 }

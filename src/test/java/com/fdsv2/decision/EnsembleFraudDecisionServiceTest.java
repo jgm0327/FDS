@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 import com.fdsv2.modelclient.FraudScore;
 import com.fdsv2.modelclient.ModelInferenceClient;
 import com.fdsv2.modelclient.RawFeatureStep;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -24,8 +25,11 @@ class EnsembleFraudDecisionServiceTest {
     @Mock
     private ModelInferenceClient modelInferenceClient;
 
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+
     private EnsembleFraudDecisionService service(double modelWeight, double ruleWeight, double low, double high) {
-        return new EnsembleFraudDecisionService(ruleEngine, modelInferenceClient, modelWeight, ruleWeight, low, high);
+        return new EnsembleFraudDecisionService(
+                ruleEngine, modelInferenceClient, meterRegistry, modelWeight, ruleWeight, low, high);
     }
 
     @Test
@@ -98,6 +102,37 @@ class EnsembleFraudDecisionServiceTest {
         FraudDecision decision = service.decide("acc-nan", step);
 
         assertThat(decision.action()).isEqualTo(Action.STEP_UP_AUTH);
+    }
+
+    @Test
+    void 판정할때마다_액션별_분포_카운터와_결합연산_latency를_기록한다() {
+        EnsembleFraudDecisionService service = service(0.7, 0.3, 0.3, 0.7);
+        RawFeatureStep step = new RawFeatureStep("acc-1", 3, 1.1, 100L, false, "GROCERY");
+        when(ruleEngine.evaluate("acc-1", step)).thenReturn(new RuleVerdict(null, 0.1, List.of()));
+        when(modelInferenceClient.predict("acc-1")).thenReturn(new FraudScore("acc-1", 0.5, FraudScore.SOURCE_MODEL));
+
+        FraudDecision decision = service.decide("acc-1", step);
+
+        assertThat(meterRegistry.get("fds.decision.action.count")
+                        .tag("action", decision.action().name())
+                        .counter().count())
+                .isEqualTo(1.0);
+        assertThat(meterRegistry.get("fds.decision.ensemble.combine.latency").timer().count()).isEqualTo(1L);
+    }
+
+    @Test
+    void 규칙엔진이_즉시_액션을_정해도_액션별_분포_카운터는_기록된다() {
+        // 즉시 결정 경로(immediateDecision)는 combine.latency Timer를 거치지 않지만,
+        // action.count는 decide()에서 공통으로 남기므로 여기서도 기록돼야 한다.
+        EnsembleFraudDecisionService service = service(0.7, 0.3, 0.3, 0.7);
+        RawFeatureStep step = new RawFeatureStep("acc-bad2", 1, 1.0, 10L, false, "GROCERY");
+        when(ruleEngine.evaluate("acc-bad2", step))
+                .thenReturn(new RuleVerdict(Action.BLOCK, 1.0, List.of("blacklist")));
+
+        service.decide("acc-bad2", step);
+
+        assertThat(meterRegistry.get("fds.decision.action.count").tag("action", "BLOCK").counter().count())
+                .isGreaterThanOrEqualTo(1.0);
     }
 
     @Test

@@ -1,0 +1,63 @@
+{
+  "title": "FDS v2 - CP5 Decision Ensemble",
+  "uid": "fds-v2-cp5",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "5s",
+  "tags": ["fds-v2", "cp5"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "액션별 분포 (허용/추가인증/차단)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP5 - 액션별 분포. fds.decision.action.count 커스텀 카운터(EnsembleFraudDecisionService) 기반 — 임계값(low/high-threshold)이 너무 엄격하면 BLOCK/STEP_UP_AUTH가 몰리고, 너무 느슨하면 ALLOW가 몰린다.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (action) (rate(fds_decision_action_count_total[1m]))",
+          "legendFormat": "{{action}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "End-to-end latency (CP3 완료 -> CP5 판정, p50/p95/p99)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP5 - End-to-end latency (수집→판정 전체). 정확히는 CP3 Redis 쓰기 완료 시점부터 CP5 판정 완료까지 — CP1~CP3 구간은 각자의 대시보드에서 이미 측정 중이라 여기서 다시 재지 않는다(FraudDecisionEventListener 클래스 javadoc 참고). 전용 스레드풀 큐잉 시간도 포함된 값이라, SLA(예: 500ms)를 넘기 시작하면 판정 자체보다 큐잉 지연을 먼저 의심할 것.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(fds_decision_e2e_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(fds_decision_e2e_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(fds_decision_e2e_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "앙상블 결합 연산 latency (p50/p99)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP5 - 앙상블 결합 연산 latency (\"병목이 아닌지 확인, 보통 매우 짧아야 정상\"). ModelInferenceClient.predict()의 HTTP 왕복 시간은 제외하고 가중합+임계값 비교라는 순수 연산만 잰다 — 이 패널이 ms 단위로 튀면 그 자체가 이상 신호.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(fds_decision_ensemble_combine_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.99, sum(rate(fds_decision_ensemble_combine_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "판정 처리량 (액션 무관, 초당 전체 판정 수)",
+      "description": "fds.decision.action.count 전체 합 — 자동 트리거가 실제로 얼마나 많은 거래를 판정하고 있는지 처리량 관점에서 확인.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(fds_decision_action_count_total[1m]))", "legendFormat": "판정/s" }
+      ]
+    }
+  ]
+}
