@@ -25,8 +25,8 @@
     },
     {
       "id": 2,
-      "title": "End-to-end latency (CP3 완료 -> CP5 판정, p50/p95/p99)",
-      "description": "docs/PERFORMANCE_MEASUREMENT.md CP5 - End-to-end latency (수집→판정 전체). 정확히는 CP3 Redis 쓰기 완료 시점부터 CP5 판정 완료까지 — CP1~CP3 구간은 각자의 대시보드에서 이미 측정 중이라 여기서 다시 재지 않는다(FraudDecisionEventListener 클래스 javadoc 참고). 전용 스레드풀 큐잉 시간도 포함된 값이라, SLA(예: 500ms)를 넘기 시작하면 판정 자체보다 큐잉 지연을 먼저 의심할 것.",
+      "title": "CP5 자체 처리 latency (CP3 완료 -> 판정 완료, 전체 파이프라인 SLA 아님)",
+      "description": "docs/PERFORMANCE_MEASUREMENT.md CP5 \"End-to-end latency (수집→판정 전체)\" 항목에 대응하되, 이 패널 자체는 그 전체 구간이 아니라 CP3 Redis 쓰기 완료 시점부터 CP5 판정 완료까지만 잰다 — CP1(수집)~CP2(집계)~CP3(저장) 구간은 각자의 대시보드에서 이미 측정 중이라 여기서 다시 재면 중복이다(FraudDecisionEventListener 클래스 javadoc 참고). 문서의 \"전체 SLA(예: 500ms) 준수 여부\"를 판단하려면 이 패널 값에 CP1/CP2/CP3 대시보드의 처리 latency를 더해서 봐야 한다 — 이 패널 값만 보고 전체 SLA를 판단하지 말 것. 전용 스레드풀 큐잉 시간은 포함돼 있다.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
