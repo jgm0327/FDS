@@ -339,3 +339,59 @@ sentinel을 냄)이 섞여 있다.
    전부 실제 값으로 확인.
 4. Grafana `FDS v2 - CP3 Redis Feature Store` 대시보드 4개 패널이 전부 실데이터로 렌더링되는 것을
    스크린샷으로 확인.
+
+## CP1 확장 — Salting (`backend/kafka-salting` 브랜치)
+
+CP1 세션(`2026-09-03_backend-kafka-partitioning_session-03/04`)에서 hot partition을 실측으로
+재현한 뒤 미뤄뒀던 "진짜 해법"을 구현한다 (`docs/ARCHITECTURE.md` 1번 "핫 파티션 문제" 대응 1).
+
+### 구현 범위
+
+1. **`com.fdsv2.transaction.AccountShardKey`**: `transaction-events` 메시지 키 형식
+   ("accountId#shardIndex")을 CP1(프로듀서)과 CP2(Kafka Streams) 양쪽이 공유하는 계약으로 정의.
+2. **`TransactionEventProducer`**: `fds.kafka.transaction-events.salting.high-traffic-account-ids`
+   (CSV)에 등록된 계좌만 `shard-count`(기본 8) 중 무작위 샤드로 분산 발행. 등록 안 된 일반 계좌는
+   항상 샤드 0 고정 — 파티셔닝 불변.
+3. **CP2 2단계 파이프라인** (`SequenceAggregationTopologyConfig.buildTopology`):
+   - Stage 1(`ShardedAccountActivityProcessor`, State Store `account-shard-activity-store`) —
+     샤드 키 그대로 유지한 채 샤드별 부분 집계(슬라이딩 윈도우 건수 + 누적 합계/건수).
+   - `selectKey` + 명시적 `repartition` — 순수 accountId로 재파티션, 같은 계좌의 모든 샤드가
+     다시 한 태스크로 모임.
+   - Stage 2(`AccountActivityMergeProcessor`, State Store `account-merge-store`) — 샤드별 최신
+     스냅숏을 계좌 단위로 병합해서 옛 `AccountFeatureVector`와 동일한 형태로 출력. CP3/CP4/CP5는
+     이 변경을 전혀 모른다(출력 계약 불변).
+
+### 핵심 설계 결정
+
+- **정확한 것과 근사인 것을 명확히 구분**: `recentWindowCount`/`amountRatio`(분모)는 여러 샤드
+  값의 합/평균이라 순서 무관하게 정확하다. `lastTxGapSec`/`countryChanged`는 "전역에서 가장
+  최근 거래"가 필요한데 샤드 도착 타이밍에 따라 근사값이 된다 — 옛 `AccountActivityProcessor`와
+  동일한 "역전 이벤트가 오면 기준점을 덮어쓰지 않는다"는 방어 원칙을 여러 샤드로 확장해서 최소한의
+  안전장치는 유지한다.
+- **일반 계좌는 샤드 1개로 고정**: 두 개의 코드 경로(일반/salting)를 따로 만들지 않고 하나의
+  파이프라인으로 통일했다 — 샤드가 1개뿐이면 이 파이프라인이 옛 단일 단계 집계와 수학적으로
+  동일한 결과를 낸다. 옛 `AccountActivityProcessorTest`가 코드 수정 없이 그대로 통과하는 것으로
+  회귀 검증.
+- **명시적 `repartition()`**: Kafka Streams DSL은 `selectKey` 이후 `processValues()` 같은
+  Processor API 호출 앞에서 자동으로 재파티션 토픽을 끼워주지 않는다(그건 `groupByKey`/
+  `aggregate` 같은 DSL 집계 연산에만 해당) — `Repartitioned.withName(...)`으로 명시적으로 요청해야
+  한다.
+
+### 완료 후 확인 방법 (실제로 수행함)
+
+1. `./gradlew test` — 옛 `AccountActivityProcessorTest`(7건) 전부 무변경 통과(일반 계좌 회귀
+   검증) + 신규 `SaltedAccountAggregationTest`(4건, 다중 샤드 병합 검증) + `AccountShardKeyTest`/
+   `TransactionEventProducerTest` 전부 통과.
+2. **salting 적용 전/후 k6 hot-partition 시나리오 실측 비교** (동일 조건: ~307 req/s, 50초,
+   계좌 1개):
+   - **적용 전**: 15,324건 전부 파티션 1개(18번)로 집중. 컨슈머 랙이 그 파티션에서 최대
+     **10,348건**까지 쌓임(실제 Kafka Streams 엔진으로 처음 측정 — CP1 때는 로그만 찍는 임시
+     컨슈머라 랙 자체가 안 보였음).
+   - **적용 후**(`FDS_KAFKA_SALTING_HIGH_TRAFFIC_ACCOUNT_IDS=<계좌>`, shard-count=8): 15,395건이
+     6개 파티션(8개 샤드 중 일부가 해시 충돌)으로 분산. 파티션별 최대 랙이 **857건**으로 감소
+     (최악 케이스 기준 약 12배 개선).
+   - Redis에 최종 병합된 `feature:account:<계좌>` 값의 `recentWindowCount`가 **15395로 실제
+     발행 건수와 정확히 일치** — 재집계가 건수를 잃어버리거나 중복 세지 않았음을 확인.
+   - 부수 관찰: `lastTxGapSec`이 `-1`로 한 번 관측됨 — 문서화한 근사 트레이드오프(샤드 간 도착
+     타이밍 역전)가 실제로 나타난 사례. CP4 `TorchServeTransactionStep`의 기존 음수 gapSec
+     클램프가 이 값을 방어한다.

@@ -24,9 +24,25 @@ PyTorch 시퀀스 모델 서빙 (LSTM/Transformer, TorchServe)
 - 프로듀서: `ProducerRecord<>("transaction-events", accountId, event)`
 - 파티션 키 = accountId. 같은 계좌의 이벤트는 항상 같은 파티션 → 같은 Kafka Streams 태스크 → 순서 보장.
 - **핫 파티션 문제**: 초고빈도 계좌(PG사 등)가 특정 파티션에 트래픽을 몰아줄 수 있음.
-  - 대응 1: Salting (accountId + 서브 파티션 해시로 분산 후 재집계)
-  - 대응 2: 파티션 수를 여유 있게 잡고(예: 32~64개) 컨슈머 스케일아웃
+  - ~~대응 1: Salting~~ → **구현 완료** (`backend/kafka-salting`, `AccountShardKey`/
+    `ShardedAccountActivityProcessor`/`AccountActivityMergeProcessor` 참고). 고빈도로 지정된
+    계좌만 "accountId#shardIndex" 형식으로 여러 파티션에 분산 발행 → CP2에서 샤드별 병렬 집계
+    (Stage 1) → 계좌 단위 재파티션 + 재집계(Stage 2)로 원래 계약(`AccountFeatureVector`)을 그대로
+    복원. 일반 계좌(미지정)는 샤드 1개로 고정되어 기존 동작과 100% 동일함을 회귀 테스트로 확인.
+  - 대응 2: 파티션 수를 여유 있게 잡고(예: 32~64개) 컨슈머 스케일아웃 — **효과 없음을 실측으로
+    확인**: Kafka는 파티션 하나를 컨슈머 그룹 내 스레드 하나만 처리할 수 있어서, 컨슈머 인스턴스를
+    늘려도 단일 핫 파티션의 처리량 한계는 그대로다. 진짜 해법은 salting뿐.
   - 원칙: 파티션 수는 운영 중 늘리면 키-파티션 매핑이 깨지므로 최초 설계 시 여유 있게 잡을 것.
+  - **실측 결과**(2026-09-10, `docs/sessions/..._backend-kafka-salting_...` 참고): 동일 조건
+    (~307 req/s, 50초, 계좌 1개)에서 salting 적용 전 컨슈머 랙이 파티션 1개에 최대 10,348건까지
+    쌓였고, 적용 후에는 8개 서브샤드가 6개 파티션으로 흩어져 파티션당 최대 랙이 857건으로
+    줄었다(최악 케이스 기준 약 12배 개선). 병합 결과의 `recentWindowCount`도 실제 발행 건수와
+    정확히 일치해서 재집계 정합성을 확인했다.
+  - **트레이드오프**: `lastTxGapSec`/`countryChanged`는 여러 샤드의 도착 타이밍에 따른 근사값이다
+    (실측 중 gap이 -1로 나온 사례 1건 관측 — 사소한 역전, 이미 CP4 model-client 쪽에 있는 음수
+    gapSec 클램프로 방어됨). `recentWindowCount`/`amountRatio`는 합/평균이라 순서 무관하게
+    정확하다. 이 근사는 salting 대상으로 명시적으로 지정한 소수 고빈도 계좌에만 적용되고, 일반
+    계좌는 전혀 영향받지 않는다.
 
 ## 2. 실시간 시퀀스 집계
 
@@ -68,7 +84,8 @@ PyTorch 시퀀스 모델 서빙 (LSTM/Transformer, TorchServe)
 ## 아직 논의/구현 필요 사항 (TODO)
 
 - [ ] 파티션 수/컨슈머 인스턴스 수 구체적 산정 기준
-- [ ] Salting 적용 시 재집계 로직 상세 설계
+- [x] ~~Salting 적용 시 재집계 로직 상세 설계~~ → `backend/kafka-salting`에서 구현 완료 (위 1번
+      "핫 파티션 문제" 참고)
 - [ ] TorchServe 배포 및 gRPC/REST 인터페이스 결정
 - [ ] 앙상블 가중치/임계값 초기값 산정 방법
 - [ ] 재학습 파이프라인(라벨 지연, concept drift 대응) 구체 설계

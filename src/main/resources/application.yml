@@ -70,6 +70,16 @@ fds:
       partitions: ${FDS_KAFKA_PARTITIONS:32}
       # 로컬 단일 브로커 docker-compose로 검증할 때는 FDS_KAFKA_REPLICATION_FACTOR=1 로 오버라이드.
       replication-factor: ${FDS_KAFKA_REPLICATION_FACTOR:3}
+      salting:
+        # (backend/kafka-salting) CP1 hot-partition 세션(2026-09-10 e2e 검증)에서 실측으로 확인한
+        # 문제(핫 계좌 하나가 파티션 하나를 독점, 컨슈머 인스턴스를 늘려도 안 풀림)의 실제 해법 —
+        # docs/ARCHITECTURE.md 1번 "대응 1: Salting". 여기 등록된 계좌만 여러 서브샤드로 트래픽을
+        # 분산한다. 콤마로 구분한 accountId 목록, 기본값은 비어있음(전부 일반 계좌 취급 — 기존과
+        # 100% 동일한 동작, TransactionEventProducer/AccountShardKey 클래스 javadoc 참고).
+        high-traffic-account-ids: ${FDS_KAFKA_SALTING_HIGH_TRAFFIC_ACCOUNT_IDS:}
+        # 고빈도 계좌 하나를 몇 개 서브샤드로 나눌지. CP1이 이미 파티션 32개를 확보해뒀으니(넉넉하게
+        # 시작 -> 실측 후 조정 원칙), 그 안에서 감당 가능한 값으로 8을 기본값으로 잡았다.
+        shard-count: ${FDS_KAFKA_SALTING_SHARD_COUNT:8}
     # CP2 출력 — 계좌별 피처 벡터. CP3(Redis 피처 스토어, 별도 브랜치)가 이 토픽을 구독한다.
     # 파티션 수는 입력 토픽과 동일하게 맞춰서 계좌ID 기준 설정 일관성을 유지한다
     # (Redis 조회 자체는 파티션과 무관하지만, 두 토픽의 설정을 따로 관리할 이유가 없음).

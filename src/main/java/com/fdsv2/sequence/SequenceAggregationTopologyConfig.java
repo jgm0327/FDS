@@ -10,6 +10,7 @@ import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.kstream.Repartitioned;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
@@ -21,9 +22,23 @@ import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.support.serializer.JsonSerde;
 
 /**
- * CP2 토폴로지 배선 — transaction-events(계좌ID 키)를 읽어서, 계좌별 State Store
- * (RocksDB, {@value #STORE_NAME})로 AccountActivityProcessor가 슬라이딩 윈도우 통계를 계산하고,
- * 결과를 account-feature-updates 토픽으로 발행한다 (docs/BACKEND.md CP2 참고).
+ * CP2 토폴로지 배선 — transaction-events(계좌ID 키, backend/kafka-salting부터는
+ * "accountId#shardIndex" 형식)를 읽어서 2단계로 처리한다 (docs/BACKEND.md CP2 참고):
+ *
+ * <ol>
+ *   <li><b>Stage 1</b>({@link ShardedAccountActivityProcessor}, State Store {@value
+ *       #SHARD_STORE_NAME}) — 샤드별로 독립 병렬 집계. 고빈도 계좌는 샤드가 여러 개라 여러
+ *       Streams 태스크/스레드로 나뉘어 처리된다.</li>
+ *   <li>키를 순수 accountId로 바꾸고({@code selectKey}) <b>명시적으로 재파티션</b>
+ *       ({@code repartition}) — 같은 계좌의 모든 샤드가 다시 한 태스크로 모인다.</li>
+ *   <li><b>Stage 2</b>({@link AccountActivityMergeProcessor}, State Store {@value
+ *       #MERGE_STORE_NAME}) — 샤드들의 부분 집계를 계좌 단위로 병합해서 옛 방식과 동일한 형태의
+ *       {@link AccountFeatureVector}를 account-feature-updates로 내보낸다.</li>
+ * </ol>
+ *
+ * 일반 계좌(고빈도로 지정 안 됨)는 샤드가 항상 1개뿐이라 이 파이프라인이 옛 단일 단계 집계와
+ * 수학적으로 동일한 결과를 낸다 — AccountActivityProcessorTest(옛 이름 그대로 유지, 이제는 이
+ * 2단계 파이프라인을 거쳐 검증됨)가 그대로 통과하는 것으로 회귀 확인.
  *
  * State Store 값 직렬화는 Spring Kafka의 JsonSerde(classic Jackson 2 기반)를 쓴다 — CP1의
  * KafkaTemplate 프로듀서/컨슈머가 이미 JsonSerializer/JsonDeserializer로 이 방식을 쓰고 있어서
@@ -37,8 +52,10 @@ import org.springframework.kafka.support.serializer.JsonSerde;
 @EnableKafkaStreams
 public class SequenceAggregationTopologyConfig {
 
-    /** package-private로 노출 — AccountActivityProcessorTest가 프로덕션과 같은 store name을 쓰기 위함. */
-    static final String STORE_NAME = "account-activity-store";
+    /** package-private로 노출 — 테스트가 프로덕션과 같은 store name을 쓰기 위함. */
+    static final String SHARD_STORE_NAME = "account-shard-activity-store";
+    static final String MERGE_STORE_NAME = "account-merge-store";
+    static final String PARTIAL_REPARTITION_NAME = "account-partial-repartition";
 
     @Value("${fds.kafka.transaction-events.topic-name}")
     private String inputTopic;
@@ -153,25 +170,41 @@ public class SequenceAggregationTopologyConfig {
     }
 
     /**
-     * 실제 토폴로지 배선 로직. static으로 뽑아둔 이유는 AccountActivityProcessorTest가 이 메서드를
-     * 그대로 호출해서 검증하기 위함이다 — 테스트가 배선을 따로 베껴 쓰면 운영 코드가 바뀌어도
-     * 테스트가 그걸 못 잡아내는 채로 계속 통과하는 문제가 있었다 (코드 리뷰에서 지적됨).
+     * 실제 토폴로지 배선 로직. static으로 뽑아둔 이유는 테스트가 이 메서드를 그대로 호출해서
+     * 검증하기 위함이다 — 테스트가 배선을 따로 베껴 쓰면 운영 코드가 바뀌어도 테스트가 그걸 못
+     * 잡아내는 채로 계속 통과하는 문제가 있었다 (코드 리뷰에서 지적됨).
      */
     static KStream<String, TransactionEvent> buildTopology(
             StreamsBuilder streamsBuilder, String inputTopic, String outputTopic, Duration recentWindow) {
-        StoreBuilder<KeyValueStore<String, AccountActivityState>> storeBuilder = Stores.keyValueStoreBuilder(
-                Stores.persistentKeyValueStore(STORE_NAME),
+        StoreBuilder<KeyValueStore<String, ShardActivityState>> shardStoreBuilder = Stores.keyValueStoreBuilder(
+                Stores.persistentKeyValueStore(SHARD_STORE_NAME),
                 Serdes.String(),
-                new JsonSerde<>(AccountActivityState.class));
+                new JsonSerde<>(ShardActivityState.class));
+        StoreBuilder<KeyValueStore<String, AccountMergeState>> mergeStoreBuilder = Stores.keyValueStoreBuilder(
+                Stores.persistentKeyValueStore(MERGE_STORE_NAME),
+                Serdes.String(),
+                new JsonSerde<>(AccountMergeState.class));
         // 로깅(changelog topic 백업)은 Kafka Streams 기본값으로 이미 켜져 있다 — 별도 설정 불필요
-        // (docs/ARCHITECTURE.md 2번 "장애 대비" 요건).
-        streamsBuilder.addStateStore(storeBuilder);
+        // (docs/ARCHITECTURE.md 2번 "장애 대비" 요건). 두 State Store 모두 적용된다.
+        streamsBuilder.addStateStore(shardStoreBuilder);
+        streamsBuilder.addStateStore(mergeStoreBuilder);
 
         KStream<String, TransactionEvent> transactions = streamsBuilder.stream(
                 inputTopic, Consumed.with(Serdes.String(), new JsonSerde<>(TransactionEvent.class)));
 
         transactions
-                .processValues(() -> new AccountActivityProcessor(STORE_NAME, recentWindow), STORE_NAME)
+                // Stage 1: 샤드 키("accountId#N") 그대로 유지한 채 샤드별 부분 집계.
+                .processValues(() -> new ShardedAccountActivityProcessor(SHARD_STORE_NAME, recentWindow),
+                        SHARD_STORE_NAME)
+                // 키를 순수 accountId로 변경 -> 명시적 재파티션. 같은 계좌의 모든 샤드가 다시
+                // 하나의 태스크로 모인다 (backend/kafka-salting "salting 후 재집계").
+                .selectKey((shardKey, partial) -> partial.accountId())
+                .repartition(Repartitioned
+                        .<String, PartialAccountFeatureVector>with(Serdes.String(),
+                                new JsonSerde<>(PartialAccountFeatureVector.class))
+                        .withName(PARTIAL_REPARTITION_NAME))
+                // Stage 2: 계좌 단위로 샤드들을 병합해서 최종 AccountFeatureVector 계산.
+                .processValues(() -> new AccountActivityMergeProcessor(MERGE_STORE_NAME), MERGE_STORE_NAME)
                 .to(outputTopic, Produced.with(Serdes.String(), new JsonSerde<>(AccountFeatureVector.class)));
 
         return transactions;
