@@ -110,6 +110,25 @@ class TorchServeModelInferenceClientTest {
     }
 
     @Test
+    void Redis_시퀀스_조회가_실패해도_예외를_던지지_않고_규칙_기반_폴백으로_전환한다() {
+        // 코드 리뷰 지적 회귀 테스트: sequenceReader.readRecentSteps()가 try 밖에 있으면 여기서
+        // 예외가 predict() 밖으로 그대로 새서 "항상 FraudScore를 반환한다"는 계약이 깨졌었다.
+        when(sequenceReader.readRecentSteps("acc-redis-down"))
+                .thenThrow(new org.springframework.data.redis.RedisConnectionFailureException("connection refused"));
+        when(fallbackScorer.score(null)).thenReturn(0.5);
+
+        FraudScore score = client.predict("acc-redis-down");
+
+        assertThat(score.source()).isEqualTo(FraudScore.SOURCE_FALLBACK);
+        assertThat(score.fraudProbability()).isEqualTo(0.5);
+        verify(httpCaller, org.mockito.Mockito.never()).call(anyString());
+        assertThat(meterRegistry.get("fds.fraud.score.count")
+                        .tag("source", "FALLBACK").tag("reason", "sequence_read_error")
+                        .counter().count())
+                .isEqualTo(1.0);
+    }
+
+    @Test
     void 서킷이_열리면_TorchServe를_호출하지_않고_바로_폴백한다() {
         // slidingWindowSize=2, minimumNumberOfCalls=1, failureRateThreshold=50 이므로
         // 실패 1건만으로도 OPEN으로 전환된다.
