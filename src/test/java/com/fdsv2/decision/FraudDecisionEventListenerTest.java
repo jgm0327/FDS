@@ -51,4 +51,20 @@ class FraudDecisionEventListenerTest {
 
         verify(fraudDecisionService, never()).decide(eq("acc-1"), any());
     }
+
+    @Test
+    void event_occurredAt이_미래_시각이라_음수_경과시간이_나와도_0으로_클램프해서_기록한다() {
+        // 코드 리뷰 지적 회귀 테스트: 시스템 시계가 뒤로 튀는 등의 이유로 Duration.between(...)이
+        // 음수가 나올 수 있는데, Micrometer Timer.record(Duration)은 음수를 조용히 버린다 —
+        // 값을 잃지 않고 0으로 클램프해서 최소한 샘플 카운트는 남기는지 검증.
+        String json = "{\"accountId\":\"acc-future\",\"recentWindowCount\":1,\"amountRatio\":1.0,"
+                + "\"lastTxGapSec\":null,\"countryChanged\":false,\"merchantCategory\":\"GROCERY\"}";
+        Instant future = Instant.now().plusSeconds(60);
+
+        listener.onFeatureStoreUpdated(new FeatureStoreUpdatedEvent("acc-future", json, future));
+
+        assertThat(meterRegistry.get("fds.decision.e2e.latency").timer().count()).isEqualTo(1L);
+        assertThat(meterRegistry.get("fds.decision.e2e.latency").timer().totalTime(java.util.concurrent.TimeUnit.NANOSECONDS))
+                .isEqualTo(0.0);
+    }
 }

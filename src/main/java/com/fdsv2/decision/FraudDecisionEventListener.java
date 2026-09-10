@@ -68,19 +68,38 @@ public class FraudDecisionEventListener {
         try {
             RawFeatureStep latestStep = objectMapper.readValue(event.featureJson(), RawFeatureStep.class);
             fraudDecisionService.decide(event.accountId(), latestStep);
-            recordE2eLatency(event);
         } catch (Exception e) {
             log.warn("CP5 자동 판정 실패, 건너뜀: accountId={}, cause={}", event.accountId(), e.toString());
+            return;
         }
+        // 코드 리뷰 지적: 판정 자체(decide())는 이미 성공해서 로그/카운터까지 남긴 뒤인데, 지표
+        // 기록만 별도 try에서 하지 않으면 지표 등록 실패 같은 사소한 문제조차 "CP5 자동 판정
+        // 실패"로 오해할 수 있는 로그를 남긴다. 판정 성공/실패와 지표 기록 성공/실패를 분리한다.
+        recordE2eLatency(event);
     }
 
     private void recordE2eLatency(FeatureStoreUpdatedEvent event) {
-        Duration elapsed = Duration.between(event.occurredAt(), Instant.now());
-        Timer.builder("fds.decision.e2e.latency")
-                .description("docs/PERFORMANCE_MEASUREMENT.md CP5 - End-to-end latency"
-                        + " (CP3 Redis 쓰기 완료 -> CP5 판정 완료, 큐잉 시간 포함)")
-                .publishPercentileHistogram()
-                .register(meterRegistry)
-                .record(elapsed);
+        try {
+            Duration elapsed = Duration.between(event.occurredAt(), Instant.now());
+            if (elapsed.isNegative()) {
+                // 코드 리뷰 지적: NTP 보정 등으로 시스템 시계가 뒤로 튀면 음수가 나올 수 있는데,
+                // Micrometer의 Timer.record(Duration)은 음수를 조용히 버린다(기록도, 에러도
+                // 없음) — 그러면 정확히 "레이턴시가 이상한" 샘플이 지표에서 소리 없이 사라진다.
+                // 값을 버리지 않고 0으로 클램프해서 최소한 이 샘플이 존재했다는 것만은 남긴다.
+                log.warn("CP5 e2e latency가 음수로 계산됨(시스템 시계 보정 의심): accountId={}, elapsed={}",
+                        event.accountId(), elapsed);
+                elapsed = Duration.ZERO;
+            }
+            Timer.builder("fds.decision.e2e.latency")
+                    .description("docs/PERFORMANCE_MEASUREMENT.md CP5 - End-to-end latency"
+                            + " (CP3 Redis 쓰기 완료 -> CP5 판정 완료, 큐잉 시간 포함. CP1~CP3 구간은"
+                            + " 제외 — 클래스 javadoc 참고)")
+                    .publishPercentileHistogram()
+                    .register(meterRegistry)
+                    .record(elapsed);
+        } catch (Exception e) {
+            log.warn("CP5 e2e latency 기록 실패(판정 자체는 이미 성공함): accountId={}, cause={}",
+                    event.accountId(), e.toString());
+        }
     }
 }
