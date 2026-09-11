@@ -14,10 +14,19 @@ python -m unittest discover -s tests         # 단위 테스트 (패딩/모델 s
 python -m pytorch_sequence_model.train      # 합성 데이터로 학습, ai/artifacts/best_model.pt 생성
 python -m pytorch_sequence_model.evaluate    # 시퀀스 모델 vs 단건 베이스라인 비교 출력
 python -m pytorch_sequence_model.serving.export  # TorchScript export, ai/artifacts/traced_model.pt 생성
+python -m pytorch_sequence_model.tune_ensemble   # CP5 앙상블 가중치/임계값 그리드서치 (아래 참고)
 ```
 
 `ai/artifacts/`는 `.gitignore`에 포함되어 커밋되지 않는다 — 아래 "왜 학습 산출물을 커밋하지
 않는지" 참고.
+
+**Windows에서 `import torch`가 "애플리케이션 제어 정책에서 이 파일을 차단했습니다"로 실패하면**
+Windows 11 스마트 앱 컨트롤(Smart App Control)이 시행 모드로 켜져서 서명/평판 미검증 네이티브
+DLL(torch/scipy 등)을 차단하는 것이다(`Get-CimInstance -Namespace root/Microsoft/Windows/
+DeviceGuard -ClassName Win32_DeviceGuard`로 확인 가능) — 이 기능은 Windows 재설치 없이는 끌 수
+없게 설계되어 있어 우회하지 않는다. WSL(`wsl --install -d Ubuntu-24.04`)에 별도 Python venv를
+만들어 그 안에서 실행하면 된다 — WSL은 별도 리눅스 커널이라 이 정책이 아예 적용되지 않는다
+(`docs/sessions/2026-09-11_ai-ensemble-weight-tuning_session-01.md` 참고).
 
 ## 입력/출력 계약 (backend/model-client가 참고할 인터페이스)
 
@@ -73,6 +82,50 @@ TorchServe REST 요청/응답 형식은 `pytorch_sequence_model/serving/handler.
 AUC 차이 +0.0761, F1 차이 +0.31 — 같은 신호를 시퀀스 맥락과 함께 보는 것만으로 탐지력이
 크게 개선됨을 합성 데이터 기준으로 확인. 전체 confusion matrix 등 상세 수치는
 `docs/sessions/2026-09-04_ai-pytorch-sequence-model_session-01.md` 참고.
+
+## CP5 앙상블 가중치/임계값 산정 (`ai/ensemble-weight-tuning` 브랜치)
+
+`backend/decision-ensemble`의 `EnsembleFraudDecisionService`는 combinedScore = modelWeight*모델확률
++ ruleWeight*규칙점수를 low/high 임계값과 비교해 허용/추가인증/차단 3단계로 나눈다. 이 값들은
+원래 "모델이 시퀀스 전체를 보니 규칙보다 믿을 만하다"는 직관으로 0.7:0.3, 0.3/0.7이라고
+하드코딩돼 있었다 — `pytorch_sequence_model/tune_ensemble.py`가 이 직관을 실제로 검증한다.
+
+```bash
+cd ai
+python -m pytorch_sequence_model.train          # 체크포인트가 없으면 먼저 학습
+python -m pytorch_sequence_model.tune_ensemble  # 그리드서치 실행
+```
+
+### 방법론
+
+1. `train.py`/`evaluate.py`와 동일한 seed/split으로 val/test set을 재현한다.
+2. **val set에서만** 그리드서치한다 — `evaluate.py`가 이미 모델 자체를 test set으로 평가하므로,
+   앙상블 파라미터까지 test set에 맞추면 "test set에 대한 이중 최적화"가 된다.
+3. 비교 기준은 precision/recall/F1이 아니라 **비용 함수**다 — 3단계 액션이라 "사기를 추가인증으로
+   거른 것"과 "완전히 놓친 것"을 이진 지표로는 구분할 수 없다. `CostWeights`(스크립트 상단
+   docstring)가 액션 x 라벨 조합별 상대적 비용을 가정한다(사기 완전누출이 가장 나쁘고, 정상거래
+   차단이 정상거래 추가인증보다 나쁘다는 등) — 실제 비즈니스 비용 데이터가 없는 토이 프로젝트라
+   가정임을 명시해 둔다.
+4. 선택된 조합을 test set에 적용해 최종 수치를 기존 하드코딩값과 나란히 비교 보고한다.
+
+### 실측 결과 (합성 데이터 기준, 2026-09-11)
+
+test set 3,000건(사기 481건, 16.0%) 기준:
+
+| | model:rule 가중치 | low/high | 기대 비용 | 사기 완전누출율 | 사기 완전차단율 | 정상거래 마찰율 |
+|---|---|---|---|---|---|---|
+| 기존 하드코딩값 | 0.7 : 0.3 | 0.30/0.70 | 0.0880 | 1.04% | 93.35% | 1.23% |
+| 그리드서치 산정값 | 1.0 : 0.0 | 0.20/0.75 | 0.0633 | 0.83% | 96.67% | 1.27% |
+
+기대 비용 약 28% 감소, 사기 완전차단율 개선(93.35%→96.67%), 정상거래 마찰율은 거의 그대로.
+전체 confusion 표는 `docs/sessions/2026-09-11_ai-ensemble-weight-tuning_session-01.md` 참고.
+
+**규칙weight가 0이 되는 게 이상해 보일 수 있는데**, `backend/model-client`의
+`ModelInferenceClient`가 서킷브레이커 오픈/타임아웃 시 반환하는 폴백 확률 자체가
+`RuleBasedFallbackScorer`의 출력이다 — 즉 규칙 신호는 "가중합의 한 항"에서 "모델 장애 시의
+대체 입력"으로 자리를 옮길 뿐 시스템에서 사라지지 않는다. 이 결과는 합성 데이터 분포와
+스크립트가 가정한 비용표 위에서 나온 것이라, 실제 라벨 데이터가 쌓이면 재검증이 필요하다 —
+이 CostWeights 가정 자체를 실제 비용으로 재추정하는 것이 다음 개선 과제다.
 
 ## TorchServe 배포 — 실제로 기동해서 확인함
 

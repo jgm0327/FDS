@@ -17,10 +17,21 @@ import org.springframework.stereotype.Component;
  * 무관하게 즉시 반영") — 애매한 구간만 {@link ModelInferenceClient}를 호출해 모델 확률과 규칙
  * 점수를 가중합한다.
  *
- * <p>combinedScore = modelWeight * modelProbability + ruleWeight * ruleScore. 모델이 시퀀스 전체를
- * 보고 학습된 신호라, 규칙 기반 점수({@code RuleBasedFallbackScorer}, 4단계 이산값)보다 기본
- * 가중치를 더 준다(0.7 : 0.3) — ARCHITECTURE.md 5번 "애매한 구간은 가중합으로 세분화".
+ * <p>combinedScore = modelWeight * modelProbability + ruleWeight * ruleScore.
  * combinedScore를 lowThreshold/highThreshold와 비교해 ALLOW/STEP_UP_AUTH/BLOCK 3단계로 나눈다.
+ *
+ * <p><b>기본값의 근거(backend/ai/ensemble-weight-tuning)</b>: 이 네 값(0.7:0.3, 0.3/0.7)은 원래
+ * "모델이 시퀀스 전체를 보니 규칙보다 믿을 만하다"는 정성적 직관으로 하드코딩돼 있었다. 이후
+ * {@code ai/pytorch_sequence_model/tune_ensemble.py}가 합성 라벨 데이터(학습에 쓴 것과 같은
+ * seed/분포)로 그리드서치를 돌려 실제로 검증했고, 결과는 modelWeight=1.0/ruleWeight=0.0,
+ * lowThreshold=0.20/highThreshold=0.75 — 애매한 구간에서는 규칙점수를 아예 섞지 않는 쪽이
+ * 기대 비용을 더 낮췄다(test set 기준 하드코딩값 대비 약 28% 낮음, 세부 수치는
+ * docs/sessions/2026-09-11_ai-ensemble-weight-tuning_session-01.md 참고). ruleWeight=0이어도
+ * 규칙 신호가 완전히 사라지는 건 아니다 — {@link ModelInferenceClient}가 서킷브레이커
+ * 오픈/타임아웃 시 반환하는 폴백 확률 자체가 {@code RuleBasedFallbackScorer}의 출력이라(
+ * {@code FraudScore.SOURCE_FALLBACK}), modelProbability 자리에 규칙 기반 값이 자동으로
+ * 대입되는 구조다. 다만 이 결과는 합성 데이터와 이 스크립트가 가정한 비용(사기 완전누출이
+ * 가장 나쁘다는 등) 위에서 나온 것이라, 실제 라벨 데이터가 쌓이면 재검증이 필요하다.
  *
  * <p>(backend/decision-ensemble-observability) {@code fds.decision.action.count}(태그 action)는
  * docs/PERFORMANCE_MEASUREMENT.md CP5 "액션별 분포" 판단 근거 — 임계값이 너무 엄격/느슨한지
