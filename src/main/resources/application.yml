@@ -166,15 +166,13 @@ fds:
       # 하드룰/화이트리스트에 안 걸린 애매한 구간 전용. combinedScore = modelWeight*모델확률 +
       # ruleWeight*규칙점수(RuleBasedFallbackScorer 재사용). 값의 근거는 정성적 직관이 아니라
       # ai/pytorch_sequence_model/tune_ensemble.py의 그리드서치 실측 결과다 — 합성 라벨
-      # 데이터 기준 기대 비용이 기존 하드코딩값(0.7/0.3, 0.3/0.7) 대비 약 28% 낮다
+      # 데이터 기준 기대 비용이 기존 하드코딩값(0.7/0.3, 0.3/0.7) 대비 약 34% 낮다
       # (docs/sessions/2026-09-11_ai-ensemble-weight-tuning_session-01.md,
-      # EnsembleFraudDecisionService 클래스 javadoc 참고). ruleWeight=0이라도 서킷브레이커
-      # 폴백 시 modelProbability 자리에 규칙 기반 값이 대입되므로 규칙 신호 자체가 사라지진
-      # 않는다.
-      model-weight: ${FDS_DECISION_MODEL_WEIGHT:1.0}
-      rule-weight: ${FDS_DECISION_RULE_WEIGHT:0.0}
+      # EnsembleFraudDecisionService 클래스 javadoc 참고).
+      model-weight: ${FDS_DECISION_MODEL_WEIGHT:0.95}
+      rule-weight: ${FDS_DECISION_RULE_WEIGHT:0.05}
       # combinedScore 임계값 — [0, low) ALLOW, [low, high) STEP_UP_AUTH(추가인증), [high, 1] BLOCK.
-      low-threshold: ${FDS_DECISION_LOW_THRESHOLD:0.20}
-      high-threshold: ${FDS_DECISION_HIGH_THRESHOLD:0.75}
+      low-threshold: ${FDS_DECISION_LOW_THRESHOLD:0.25}
+      high-threshold: ${FDS_DECISION_HIGH_THRESHOLD:0.45}
     # CP5 수동/부하 검증용(FraudDecisionController) — CP3/CP4와 같은 이유로 기본 false.
     query-endpoint-enabled: ${FDS_DECISION_QUERY_ENDPOINT_ENABLED:false}
