@@ -82,7 +82,7 @@ class CostWeights:
     """
 
     fraud_allow: float = 20.0
-    fraud_step_up: float = 4.0
+    fraud_step_up: float = 8.0
     fraud_block: float = 0.0
     normal_allow: float = 0.0
     normal_step_up: float = 1.0
@@ -108,9 +108,19 @@ def actions_for(combined: np.ndarray, low: float, high: float) -> np.ndarray:
     return np.where(combined < low, 0, np.where(combined < high, 1, 2))
 
 
-def expected_cost(labels: np.ndarray, combined: np.ndarray, low: float, high: float, costs: CostWeights) -> float:
+def expected_cost(
+    labels: np.ndarray,
+    combined: np.ndarray,
+    low: float,
+    high: float,
+    costs: CostWeights,
+    table: np.ndarray | None = None,
+) -> float:
+    """`table`을 미리 계산해 넘기면(그리드서치처럼 costs가 고정인 반복 호출) 매번
+    `costs.as_table()`을 다시 만들지 않는다 — 생략하면 이 호출에서 새로 만든다."""
     action = actions_for(combined, low, high)
-    table = costs.as_table()
+    if table is None:
+        table = costs.as_table()
     return float(table[labels, action].mean())
 
 
@@ -125,13 +135,14 @@ def grid_search(
     """model_weight/low/high 조합 전체를 훑어 기대 비용이 최소인 조합을 찾는다."""
     weights = np.round(np.arange(0.0, 1.0 + 1e-9, weight_step), 2)
     thresholds = np.round(np.arange(threshold_step, 1.0, threshold_step), 2)
+    table = costs.as_table()  # costs는 그리드 전체에서 고정이므로 한 번만 계산.
 
     best = None
     for model_weight in weights:
         combined = model_weight * model_probs + (1 - model_weight) * rule_scores
         for i, low in enumerate(thresholds):
             for high in thresholds[i + 1 :]:
-                cost = expected_cost(labels, combined, low, high, costs)
+                cost = expected_cost(labels, combined, low, high, costs, table=table)
                 if best is None or cost < best["cost"]:
                     best = {"cost": cost, "model_weight": float(model_weight), "low": float(low), "high": float(high)}
     return best
@@ -139,8 +150,9 @@ def grid_search(
 
 def summarize(labels: np.ndarray, combined: np.ndarray, low: float, high: float, costs: CostWeights) -> dict:
     action = actions_for(combined, low, high)
-    table = costs.as_table()
-    cost = float(table[labels, action].mean())
+    # expected_cost()가 쓰는 것과 같은 비용 계산 로직을 여기서 다시 베끼지 않는다 — 둘이
+    # 갈라지면 그리드서치가 최적화한 비용과 여기서 보고하는 비용이 조용히 달라진다.
+    cost = expected_cost(labels, combined, low, high, costs)
 
     counts = {
         f"{'fraud' if lbl else 'normal'}_{ACTIONS[act].lower()}": int(np.sum((labels == lbl) & (action == act)))
