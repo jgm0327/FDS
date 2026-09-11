@@ -10,6 +10,7 @@ import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.grpc.Status;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
@@ -124,6 +125,24 @@ class TorchServeModelInferenceClientTest {
         verify(httpCaller, org.mockito.Mockito.never()).call(anyString());
         assertThat(meterRegistry.get("fds.fraud.score.count")
                         .tag("source", "FALLBACK").tag("reason", "sequence_read_error")
+                        .counter().count())
+                .isEqualTo(1.0);
+    }
+
+    @Test
+    void gRPC_실패는_상태코드를_반영한_reason_태그로_구분된다() {
+        // 코드 리뷰 지적 회귀 테스트: protocol=grpc일 때 모든 실패가 StatusRuntimeException으로
+        // 오는데, 이걸 REST 실패와 똑같이 "torchserve_error"로 뭉개면 DEADLINE_EXCEEDED/
+        // UNAVAILABLE처럼 원인이 다른 gRPC 실패를 운영자가 구분할 방법이 없어진다.
+        when(sequenceReader.readRecentSteps("acc-grpc")).thenReturn(List.of());
+        when(httpCaller.call(anyString()))
+                .thenThrow(Status.DEADLINE_EXCEEDED.withDescription("timeout").asRuntimeException());
+        when(fallbackScorer.score(null)).thenReturn(0.5);
+
+        client.predict("acc-grpc");
+
+        assertThat(meterRegistry.get("fds.fraud.score.count")
+                        .tag("source", "FALLBACK").tag("reason", "grpc_deadline_exceeded")
                         .counter().count())
                 .isEqualTo(1.0);
     }

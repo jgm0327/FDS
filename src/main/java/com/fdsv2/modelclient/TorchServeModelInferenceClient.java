@@ -5,6 +5,7 @@ import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadFullException;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.grpc.StatusRuntimeException;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.util.List;
@@ -107,6 +108,15 @@ public class TorchServeModelInferenceClient implements ModelInferenceClient {
         }
         if (e instanceof CallNotPermittedException) {
             return "circuit_open";
+        }
+        // (backend/model-client-grpc-benchmark) 코드 리뷰 지적: protocol=grpc일 때는 모든 실패가
+        // StatusRuntimeException으로 온다 — 이걸 REST 실패와 똑같이 "torchserve_error"로 뭉개면
+        // DEADLINE_EXCEEDED(타임아웃)와 UNAVAILABLE(연결 불가) 같은, 원인이 서로 다른 gRPC
+        // 실패를 운영자가 구분할 방법이 없어진다. gRPC의 상태 코드(getStatus().getCode())를 그대로
+        // 태그에 반영해서 REST의 "torchserve_error" 하나로 뭉뚱그리던 것과 같은 수준의 세분화를
+        // gRPC 쪽에도 맞춘다.
+        if (e instanceof StatusRuntimeException grpcException) {
+            return "grpc_" + grpcException.getStatus().getCode().name().toLowerCase();
         }
         return "torchserve_error";
     }

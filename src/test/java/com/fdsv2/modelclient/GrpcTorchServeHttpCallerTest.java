@@ -1,10 +1,13 @@
 package com.fdsv2.modelclient;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.google.protobuf.ByteString;
+import com.google.rpc.Status;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
@@ -69,5 +72,73 @@ class GrpcTorchServeHttpCallerTest {
         String result = caller.call("{\"accountId\":\"acc-1\"}");
 
         assertThat(result).isEqualTo("{\"accountId\":\"acc-1\",\"fraudProbability\":0.42}");
+    }
+
+    @Test
+    void gRPC_레벨_오류_응답은_예외로_전파된다() throws IOException {
+        // TorchServeHttpCaller 인터페이스 계약(@throws RuntimeException) 회귀 테스트 — 성공
+        // 경로만 검증하던 기존 테스트로는 이 계약이 깨져도(예: 예외를 삼키고 빈 문자열을 반환)
+        // 잡히지 않았다.
+        Server errorServer = ServerBuilder.forPort(0)
+                .addService(new InferenceAPIsServiceGrpc.InferenceAPIsServiceImplBase() {
+                    @Override
+                    public void predictions(
+                            PredictionsRequest request, StreamObserver<PredictionResponse> responseObserver) {
+                        responseObserver.onError(io.grpc.Status.UNAVAILABLE.withDescription("model down").asRuntimeException());
+                    }
+                })
+                .build()
+                .start();
+        GrpcTorchServeHttpCaller errorCaller = new GrpcTorchServeHttpCaller(
+                "localhost", errorServer.getPort(), 1000, "fds-sequence-model", new SimpleMeterRegistry());
+
+        try {
+            assertThatThrownBy(() -> errorCaller.call("{\"accountId\":\"acc-1\"}"))
+                    .isInstanceOf(StatusRuntimeException.class);
+        } finally {
+            errorCaller.shutdown();
+            errorServer.shutdownNow();
+        }
+    }
+
+    @Test
+    void 응답_메시지_안에_오류_상태가_담겨있으면_예외를_던진다() {
+        // inference.proto의 status 필드는 주로 스트리밍용이라 단항 Predictions RPC에서 채워질
+        // 일은 거의 없지만, GrpcTorchServeHttpCaller가 이 필드를 무시하지 않고 실제로 확인하는지
+        // 검증한다 — 무시하면 오류가 "성공"으로 취급돼 빈 prediction 바이트가 그대로 반환된다.
+        // setUp()의 공용 server/caller와는 별개 포트를 쓰므로 건드리지 않는다.
+        Server statusErrorServer = null;
+        try {
+            statusErrorServer = ServerBuilder.forPort(0)
+                    .addService(new InferenceAPIsServiceGrpc.InferenceAPIsServiceImplBase() {
+                        @Override
+                        public void predictions(
+                                PredictionsRequest request, StreamObserver<PredictionResponse> responseObserver) {
+                            responseObserver.onNext(PredictionResponse.newBuilder()
+                                    .setStatus(Status.newBuilder()
+                                            .setCode(com.google.rpc.Code.INTERNAL_VALUE)
+                                            .setMessage("internal error")
+                                            .build())
+                                    .build());
+                            responseObserver.onCompleted();
+                        }
+                    })
+                    .build()
+                    .start();
+            GrpcTorchServeHttpCaller statusErrorCaller = new GrpcTorchServeHttpCaller(
+                    "localhost", statusErrorServer.getPort(), 1000, "fds-sequence-model", new SimpleMeterRegistry());
+
+            assertThatThrownBy(() -> statusErrorCaller.call("{\"accountId\":\"acc-1\"}"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("internal error");
+
+            statusErrorCaller.shutdown();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        } finally {
+            if (statusErrorServer != null) {
+                statusErrorServer.shutdownNow();
+            }
+        }
     }
 }
