@@ -4,7 +4,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -15,8 +15,14 @@ import org.springframework.web.client.RestClient;
  *
  * BACKEND.md 핵심 설계 결정("TorchServe는 REST 먼저, gRPC는 다음 단계")의 "REST 먼저" 부분 —
  * "다음 단계"는 {@link GrpcTorchServeHttpCaller}(backend/model-client-grpc-benchmark)로 구현됐다.
- * 기본값(matchIfMissing=true)이라 {@code fds.model-serving.torchserve.protocol}을 지정하지
- * 않으면 지금까지와 완전히 동일하게 동작한다.
+ *
+ * <p>조건을 "protocol == grpc가 아니면 전부"로 잡은 이유(코드 리뷰 지적): {@code @ConditionalOnProperty}로
+ * havingValue="rest"를 정확히 매칭시키면, 오타/대소문자(예: "REST", "Grpc")가 들어왔을 때 이
+ * 빈도 {@link GrpcTorchServeHttpCaller}도 활성화 안 돼서 {@link TorchServeHttpCaller} 빈이
+ * 하나도 없는 채로 기동에 실패한다 — 원인을 짐작하기 어려운
+ * {@code UnsatisfiedDependencyException}만 던지고 끝난다. "grpc를 명시적으로 지정한 경우만
+ * gRPC, 그 외(오타 포함)는 전부 REST"로 잡으면 최소한 기동은 항상 되고, REST가 원래 기본값이라는
+ * 취지도 그대로 유지된다.
  *
  * connect/read timeout을 모두 fds.model-serving.torchserve.timeout-ms로 통일한 이유: 이 값이
  * Resilience4j Circuit Breaker의 "얼마나 기다리다 실패로 칠지" 기준과 같아야, 서킷브레이커가
@@ -31,16 +37,12 @@ import org.springframework.web.client.RestClient;
  * 감싸는 이유).
  */
 @Component
-@ConditionalOnProperty(
-        prefix = "fds.model-serving.torchserve",
-        name = "protocol",
-        havingValue = "rest",
-        matchIfMissing = true)
+@ConditionalOnExpression("!'grpc'.equalsIgnoreCase('${fds.model-serving.torchserve.protocol:rest}')")
 public class RestClientTorchServeHttpCaller implements TorchServeHttpCaller {
 
     private final RestClient restClient;
     private final String modelName;
-    private final MeterRegistry meterRegistry;
+    private final Timer callLatencyTimer;
 
     public RestClientTorchServeHttpCaller(
             @Value("${fds.model-serving.torchserve.base-url}") String baseUrl,
@@ -56,21 +58,16 @@ public class RestClientTorchServeHttpCaller implements TorchServeHttpCaller {
                 .requestFactory(requestFactory)
                 .build();
         this.modelName = modelName;
-        this.meterRegistry = meterRegistry;
+        this.callLatencyTimer = TorchServeCallerLatencyTimer.create(meterRegistry, "rest");
     }
 
     @Override
     public String call(String requestBodyJson) {
-        return Timer.builder("fds.model-serving.torchserve.caller.latency")
-                .description("docs/PERFORMANCE_MEASUREMENT.md CP4 확장 - REST vs gRPC 호출 자체(직렬화+네트워크) latency")
-                .tag("protocol", "rest")
-                .publishPercentileHistogram()
-                .register(meterRegistry)
-                .record(() -> restClient.post()
-                        .uri("/predictions/{modelName}", modelName)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .body(requestBodyJson)
-                        .retrieve()
-                        .body(String.class));
+        return callLatencyTimer.record(() -> restClient.post()
+                .uri("/predictions/{modelName}", modelName)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(requestBodyJson)
+                .retrieve()
+                .body(String.class));
     }
 }
