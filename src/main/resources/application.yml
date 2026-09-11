@@ -121,6 +121,14 @@ fds:
       # ai/pytorch_sequence_model/serving/export.py가 torch-model-archiver에 넘기는
       # --model-name과 반드시 같아야 한다 (다르면 TorchServe가 404를 낸다).
       model-name: ${TORCHSERVE_MODEL_NAME:fds-sequence-model}
+      # (backend/model-client-grpc-benchmark) rest(기본) | grpc — 둘 중 어느 TorchServeHttpCaller
+      # 구현체가 활성화되는지 결정한다. RestClientTorchServeHttpCaller/GrpcTorchServeHttpCaller의
+      # @ConditionalOnProperty 참고.
+      protocol: ${TORCHSERVE_PROTOCOL:rest}
+      # TorchServe는 기본적으로 REST(8080)와 gRPC(7070)를 같은 프로세스에서 함께 띄운다
+      # (ai/README.md TorchServe 배포 절 — 별도 설정 없이도 둘 다 열린다).
+      grpc-host: ${TORCHSERVE_GRPC_HOST:localhost}
+      grpc-port: ${TORCHSERVE_GRPC_PORT:7070}
       circuit-breaker:
         # 최근 sliding-window-size건 중 이 비율(%) 이상 실패하면 OPEN.
         failure-rate-threshold: ${TORCHSERVE_CB_FAILURE_RATE_THRESHOLD:50}

@@ -177,6 +177,34 @@ torchserve --stop
 CP4 성능 측정 표(추론 latency p50/p95/p99, 서킷브레이커 폴백 전환)는 k6 부하 + Prometheus
 연동이 필요해 이번 세션 범위 밖 — 다음 세션 TODO.
 
+### gRPC 배포 — REST와 나란히 실측 (backend/model-client-grpc-benchmark)
+
+TorchServe는 별도 설정 없이도 REST(8080)와 gRPC(7070)를 같은 프로세스에서 함께 띄운다.
+Windows(Spring Boot 앱) + WSL(TorchServe) 조합에서 실측하려면 REST 절차에 아래 두 가지가
+추가로 필요했다:
+
+1. **`config.properties`로 REST/gRPC 둘 다 `0.0.0.0`에 바인딩**: 기본값은 REST/gRPC 모두
+   `127.0.0.1`(loopback)이라 WSL 밖(Windows)에서 접근이 안 된다. gRPC는 `inference_address`와
+   별개 속성(`grpc_inference_address`, TorchServe `ConfigManager.java` 참고)으로 관리되므로
+   둘 다 명시해야 한다:
+   ```properties
+   inference_address=http://0.0.0.0:18280
+   grpc_inference_address=0.0.0.0
+   grpc_inference_port=17070
+   ```
+   (포트를 8080/7070 기본값에서 옮긴 이유는 이 환경에서 Docker Desktop이 이미 8080을 쓰고
+   있어서 — 프로젝트의 기존 포트 충돌 회피 관례와 동일)
+2. **Windows에서는 WSL 인스턴스의 IP로 접근**: `localhost`가 아니라 `wsl hostname -I`로 나온
+   IP를 써야 한다 — WSL2의 localhost 포워딩이 모든 바인딩 형태를 커버하지는 않았다.
+3. **`torchserve --start`가 백그라운드로 안 남는 문제**: `wsl.exe -- bash -c "torchserve --start ..."`
+   처럼 실행하면 그 호출이 끝나는 순간 내부적으로 fork된 TorchServe 프로세스까지 같이
+   종료됐다(WSL의 세션 종료 시 하위 프로세스 정리 동작으로 추정). `--foreground` 옵션으로
+   TorchServe 자체의 내부 데몬화를 끄고, 대신 `setsid nohup ... </dev/null >log 2>&1 &`로
+   완전히 분리해야 `wsl.exe` 호출이 끝난 뒤에도 살아남았다.
+
+REST/gRPC 클라이언트 latency 실측 비교 결과는 `docs/ARCHITECTURE.md` 4번 "REST vs gRPC 실측
+비교" 및 `docs/sessions/2026-09-11_backend-model-client-grpc-benchmark_session-01.md` 참고.
+
 ### 워커 수 — 기본값(1)으로는 k6 10 VU 동시 부하를 못 버틴다 (backend/model-client-concurrency-fix 실측)
 
 위 `torchserve --start` 명령은 워커 수를 지정하지 않으면 `minWorkers=maxWorkers=1`로 뜬다

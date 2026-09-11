@@ -82,6 +82,27 @@ PyTorch 시퀀스 모델 서빙 (LSTM/Transformer, TorchServe)
 - 모델: LSTM 또는 소규모 Transformer 인코더, TorchServe로 서빙
 - 출력: 이상거래 확률 (0~1)
 - **장애 대응**: Resilience4j Circuit Breaker + 타임아웃. 모델 서버 응답 지연/실패 시 규칙 기반 기본 스코어로 폴백하여 전체 판정 흐름이 막히지 않도록 함.
+- **REST vs gRPC 실측 비교** (`backend/model-client-grpc-benchmark`) — "REST 먼저, gRPC는 다음
+  단계"였던 계획을 실제로 구현/실측했다. `GrpcTorchServeHttpCaller`가 기존
+  `TorchServeHttpCaller` 인터페이스를 그대로 구현해서 Circuit Breaker/Bulkhead/폴백 로직은
+  전혀 안 건드리고 전송 계층만 교체 가능하게 만들었고, 같은 앱에 `fds.model-serving.torchserve.protocol`
+  설정 하나로 REST/gRPC를 전환하며 k6로 동일 조건(4 VU, TorchServe 워커 4개) 부하를 걸어
+  `fds.model-serving.torchserve.caller.latency`(직렬화+네트워크 왕복만, protocol 태그로 구분)를
+  비교했다.
+  - **실측 결과**(2026-09-11, `docs/sessions/2026-09-11_backend-model-client-grpc-benchmark_session-01.md`
+    참고): 중앙값(p50)은 gRPC가 REST보다 일관되게 낮았다(gRPC 23~26ms vs REST 31~39ms, 두 번
+    반복 측정 모두 같은 방향). 반면 꼬리 지연(p95/p99)은 REST/gRPC 양쪽 다 반복 측정 사이의
+    편차가 너무 커서(REST만도 두 번 실행에서 p95가 75ms→149ms로 거의 2배 차이) 어느 쪽이
+    낫다고 결론 내릴 수 없었다 — 공유 개발 머신(WSL2+Docker+다른 프로세스들)의 시스템 노이즈가
+    신호보다 크다고 판단.
+  - **결론**: "gRPC가 무조건 더 빠르다"가 아니라 "중앙값은 gRPC가 유리하다는 신호가 있지만,
+    꼬리 지연 비교는 이 측정 환경에서는 확정할 수 없다"는 게 정직한 결론이다. 실제 운영 환경
+    (전용 리소스, 반복 측정 다수 회)에서 재검증이 필요하다는 걸 명시적으로 남긴다.
+  - **REST를 그대로 기본값으로 유지**: 위 결론이 gRPC 전환을 확신 있게 정당화하지 못하고,
+    REST가 이미 기존 API 게이트웨이/디버깅 툴체인과 자연스럽게 맞물리는 이점(디버깅 시
+    curl 하나로 확인 가능, 스키마 버저닝 부담 없음)이 있어 기본값은 바꾸지 않았다 —
+    `GrpcTorchServeHttpCaller`는 `fds.model-serving.torchserve.protocol=grpc`로 언제든 켤 수
+    있는 옵션으로 남겨둔다.
 
 ## 5. 판정 및 대응
 
@@ -124,7 +145,10 @@ PyTorch 시퀀스 모델 서빙 (LSTM/Transformer, TorchServe)
 - [ ] 파티션 수/컨슈머 인스턴스 수 구체적 산정 기준
 - [x] ~~Salting 적용 시 재집계 로직 상세 설계~~ → `backend/kafka-salting`에서 구현 완료 (위 1번
       "핫 파티션 문제" 참고)
-- [ ] TorchServe 배포 및 gRPC/REST 인터페이스 결정
+- [x] ~~TorchServe 배포 및 gRPC/REST 인터페이스 결정~~ → `backend/model-client-grpc-benchmark`에서
+      둘 다 구현하고 실측 비교 완료 (위 4번 "PyTorch 시퀀스 모델 서빙" 참고). 결론: REST를
+      기본값으로 유지, gRPC는 옵션으로 남김 — 꼬리 지연 비교는 측정 환경 노이즈 때문에
+      결론을 못 내려서 운영 환경 재검증이 남아있음.
 - [x] ~~앙상블 가중치/임계값 초기값 산정 방법~~ → `ai/ensemble-weight-tuning`에서 그리드서치로
       구현 완료 (위 5번 "판정 및 대응" 참고). 실제 라벨 데이터 확보 시 재검증 필요는 남아있음.
 - [ ] 재학습 파이프라인(라벨 지연, concept drift 대응) 구체 설계

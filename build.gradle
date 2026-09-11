@@ -2,6 +2,10 @@ plugins {
 	id 'java'
 	id 'org.springframework.boot' version '4.1.1'
 	id 'io.spring.dependency-management' version '1.1.7'
+	// (backend/model-client-grpc-benchmark) TorchServe 공식 gRPC 추론 API(src/main/proto/inference.proto)로부터
+	// Java 클라이언트 스텁을 생성한다 — 서버가 아니라 클라이언트만 필요하므로 protoc + grpc-java 플러그인만
+	// 배선하면 충분하다.
+	id 'com.google.protobuf' version '0.9.4'
 }
 
 group = 'com.fdsv2'
@@ -55,6 +59,29 @@ dependencies {
 	// 실제 배포된 워커 수만큼으로 제한해서, 초과분은 TorchServe까지 가지도 않고 즉시 폴백으로
 	// 빠지게 한다(ModelClientConfig 클래스 javadoc, docs/sessions 세션 로그 참고).
 	implementation 'io.github.resilience4j:resilience4j-bulkhead:2.2.0'
+	// (backend/model-client-grpc-benchmark) TorchServe gRPC 추론 API 클라이언트 — REST
+	// (RestClientTorchServeHttpCaller)와 동일한 TorchServeHttpCaller 인터페이스를 구현하는
+	// GrpcTorchServeHttpCaller에서만 쓰인다. grpc-netty-shaded는 별도 netty 의존성 충돌(Spring
+	// WebFlux 등)을 피하려고 shaded 버전을 쓴다 — 이 프로젝트는 WebMVC(서블릿)라 충돌 여지는
+	// 적지만, TorchServe 공식 예제/문서가 shaded를 표준으로 쓰므로 그대로 따른다.
+	// 버전을 1.83.1로 고정한 이유: Spring Boot 4.1.1의 관리 의존성(io.spring.dependency-management)이
+	// io.grpc/protobuf-java 좌표를 이미 이 버전대로 강제하고 있어서(Spring Boot 4가 gRPC를 1급으로
+	// 지원하기 시작한 영향으로 추정), 낮은 버전(1.68.1)을 선언해도 실제로는 조용히 1.83.1로
+	// 끌어올려졌다 — 그 상태에서 protoc-gen-grpc-java 1.68.1로 생성한 스텁을 실행하니
+	// `AbstractMethodError`가 났다(코드 생성 시점 gRPC API 형태와 런타임에 실제로 깔리는 gRPC API
+	// 형태가 어긋난 것). "선언한 버전"과 "실제로 도는 버전"을 명시적으로 일치시켜 이 문제를 없앴다.
+	implementation 'io.grpc:grpc-netty-shaded:1.83.1'
+	implementation 'io.grpc:grpc-protobuf:1.83.1'
+	implementation 'io.grpc:grpc-stub:1.83.1'
+	// 위와 같은 이유로 protobuf-java도 실제 런타임에 깔리는 버전(4.35.1)을 명시적으로 선언 —
+	// 선언 안 해도 어차피 이 버전으로 끌어올려지지만, 숨겨진 강제 승격에 기대지 않고 protoc
+	// 컴파일러 버전(아래 protobuf{} 블록)과 맞춰 명시해 둔다.
+	implementation 'com.google.protobuf:protobuf-java:4.35.1'
+	// inference.proto가 import하는 google/rpc/status.proto의 실제 정의.
+	implementation 'com.google.api.grpc:proto-google-common-protos:2.41.0'
+	// grpc-stub이 생성하는 코드의 @Generated 애너테이션에 필요 (JDK 9+에서 javax.annotation이
+	// 빠지면서 별도 의존성으로 추가해야 함).
+	compileOnly 'org.apache.tomcat:annotations-api:6.0.53'
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'
 	testImplementation 'org.springframework.boot:spring-boot-starter-actuator-test'
@@ -69,4 +96,27 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+}
+
+// (backend/model-client-grpc-benchmark) src/main/proto/inference.proto -> Java 메시지/gRPC 스텁 생성.
+// protoc/grpc-java 플러그인 버전은 실제 런타임에 깔리는 io.grpc/protobuf-java 버전(위 dependencies
+// 블록 주석 참고, 1.83.1/4.35.1)과 반드시 맞춘다 — 버전이 어긋나면 생성된 스텁이 런타임 클래스와
+// ABI가 안 맞아 AbstractMethodError 등으로 실패한다(실제로 겪은 문제, GrpcTorchServeHttpCallerTest
+// 참고).
+protobuf {
+	protoc {
+		artifact = 'com.google.protobuf:protoc:4.35.0'
+	}
+	plugins {
+		grpc {
+			artifact = 'io.grpc:protoc-gen-grpc-java:1.83.1'
+		}
+	}
+	generateProtoTasks {
+		all().each { task ->
+			task.plugins {
+				grpc {}
+			}
+		}
+	}
 }
