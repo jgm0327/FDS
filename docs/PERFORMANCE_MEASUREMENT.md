@@ -81,6 +81,24 @@ Prometheus + Grafana로 지표를 수집하고, k6로 부하를 발생시켜 측
 
 ---
 
+## CP6 — 피드백 루프(라벨 시뮬레이션/조인)
+
+**측정 목적**: 판정→라벨 공개까지의 파이프라인이 실제로 데이터를 잃지 않고 흘러가는지, 시뮬레이션
+라벨 분포가 합리적인지 확인 (`docs/ARCHITECTURE.md` 6번, `backend/feedback-loop` 참고).
+
+| 지표 | 수집 방식 | 확인 포인트 |
+|---|---|---|
+| `fds.feedback.decision.recorded.count` | Micrometer Counter | CP5 판정 건수와 대체로 일치하는지(크게 어긋나면 CP6 기록 실패가 잦다는 뜻) |
+| `fds.feedback.label.count`(태그 `label`, `source`) | Micrometer Counter | 시뮬레이션 라벨의 정상/사기 비율 — 극단적으로 한쪽에 쏠리면 휴리스틱 임계값 재검토 필요 |
+| `fds.feedback.label.delay.seconds` | Micrometer Timer | 실제 시뮬레이션된 지연 분포가 설정값(min/max-delay-seconds) 범위 안인지 |
+
+**확인 방법(로컬)**: `wc -l data/feedback/labeled-dataset.jsonl`로 누적 레코드 수 확인,
+`docker exec fds-v2-redis redis-cli ZCARD feedback:pending:index`로 아직 공개 전인 대기 건수 확인
+(계속 늘어나기만 하면 스케줄러가 안 돌고 있다는 신호). k6 시나리오는 별도로 두지 않았다 — CP6은
+CP5 판정 이후 비동기/오프라인 경로라 CP5의 부하 시나리오에 자연히 얹혀 함께 측정된다.
+
+---
+
 ## Grafana 대시보드 구성 원칙
 
 - 패널을 CP1~CP5 순서대로 배치해서, 대시보드를 위에서 아래로 보면 파이프라인 흐름과 일치하도록 구성.

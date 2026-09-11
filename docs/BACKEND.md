@@ -395,3 +395,67 @@ CP1 세션(`2026-09-03_backend-kafka-partitioning_session-03/04`)에서 hot part
    - 부수 관찰: `lastTxGapSec`이 `-1`로 한 번 관측됨 — 문서화한 근사 트레이드오프(샤드 간 도착
      타이밍 역전)가 실제로 나타난 사례. CP4 `TorchServeTransactionStep`의 기존 음수 gapSec
      클램프가 이 값을 방어한다.
+
+## 6차 구현 범위 (CP6) — `backend/feedback-loop` 브랜치
+
+재학습 피드백 루프. CP5 판정 로그 + 지연 도착하는 라벨(실제 은행 라벨이 없어 시뮬레이션)을
+조인해서 재학습용 데이터셋을 만든다 (`docs/ARCHITECTURE.md` 6번 "피드백 루프 및 재학습" 참고).
+
+### 스펙 (ARCHITECTURE.md 6번 그대로)
+
+- CP5 판정이 끝날 때마다 판정에 실제로 쓰인 시퀀스와 함께 Redis에 "라벨 공개 대기" 상태로 기록
+- 라벨은 기록 시점에 시뮬레이션 휴리스틱으로 즉시 계산(판정 액션/모델 확률은 참조하지 않음),
+  다만 데이터셋으로의 "공개"는 랜덤 지연(기본 5~30분) 후에만 이뤄짐
+- 지연이 지나면 조인 결과를 JSONL 파일 한 줄로 기록(`data/feedback/labeled-dataset.jsonl`)
+
+### 구현 컴포넌트
+
+`com.fdsv2.feedback` 패키지 신설:
+
+- `FeedbackTransactionStep` — TorchServe wire 스키마와 필드를 맞춘 거래 1건 표현(CP4의
+  package-private `TorchServeTransactionStep`을 재사용할 수 없어 독립적으로 정의).
+- `PendingDecisionRecord` / `FeedbackDatasetRecord` — 각각 Redis 대기 레코드 / 최종 JSONL 레코드.
+- `FeedbackKeyBuilder` — `feedback:pending:{decisionId}` 키 + `feedback:pending:index` ZSET
+  인덱스 키 조립.
+- `SimulatedLabelHeuristic` — `ai/pytorch_sequence_model/data/synthetic.py`의 3가지 이상 패턴
+  (금액 급증 ≥3배, 짧은 간격 ≤30초, 국가변경+금액증가 ≥1.5배)을 재현 + 대칭 flip 노이즈(기본 5%).
+- `FeedbackDecisionRecorder` — 판정 직후 호출되어 라벨을 즉시 계산하고 Redis에 SET(TTL)+ZADD.
+- `FeedbackLabelScheduler` — `@Scheduled` 폴링으로 만기된 항목을 `ZRANGEBYSCORE`로 찾아
+  `FeedbackDatasetWriter`에 기록 후 Redis에서 제거(손상된 레코드도 재시도 없이 버림).
+- `FeedbackDatasetWriter` — JSONL 파일 append(단일 인스턴스 전제, 락 없음).
+- `FeedbackConfig` — `@EnableScheduling` + `SimulatedLabelHeuristic`이 쓰는 `Random` 빈.
+- 기존 `FraudDecisionEventListener` 수정 — `decide()` 성공 직후
+  `AccountRecentSequenceReader.readRecentSteps(accountId)`로 시퀀스를 다시 읽어
+  `FeedbackDecisionRecorder.record(...)` 호출(실패 격리 — CP6 실패가 CP5 판정에 영향 없음).
+
+### 핵심 설계 결정
+
+- **새 Kafka 토픽을 만들지 않음** — 지금 판정 로그를 구독할 외부 컨슈머가 없어 YAGNI로 판단,
+  같은 프로세스 안에서 Redis에 직접 기록한다(`docs/ARCHITECTURE.md` 6번 참고).
+- **라벨은 기록 시점에 계산, 공개만 지연** — 실제 은행 업무의 "사기 여부는 이미 정해져 있고
+  확인에 시간이 걸릴 뿐"이라는 구조를 그대로 반영. `FeedbackLabelScheduler`는 재채점하지 않는다.
+- **라벨 휴리스틱은 판정 결과를 참조하지 않음** — 참조하면 모델 예측을 그대로 라벨로 되먹이는
+  순환 오류가 된다.
+- **첫 거래의 `lastTxGapSec == null`을 burst로 오판하지 않도록 클램프 이전 원본
+  (`RawFeatureStep`)으로 판단** — `FeedbackTransactionStep`으로 변환하면 null이 0.0으로
+  클램프되어 모든 시퀀스의 첫 거래가 "간격 30초 이하"에 걸려버리는 버그를 구현 중 발견하고 수정.
+- **Redis pending + ZSET 인덱스** — `KEYS` 전체 스캔 없이 `ZRANGEBYSCORE(-inf, now)`로 만기 항목만
+  조회.
+- **손상된 pending 레코드는 재시도하지 않고 버림** — 완전한 DLQ보다 "실패하면 버리고 계속 진행"이
+  이번 범위에서 더 합리적인 트레이드오프.
+
+### 완료 후 확인 방법 (실제로 수행함)
+
+1. `./gradlew test` — 신규 4개 테스트 클래스(`SimulatedLabelHeuristicTest` 7건,
+   `FeedbackDecisionRecorderTest` 4건, `FeedbackLabelSchedulerTest` 5건,
+   `FeedbackDatasetWriterTest` 2건) + `FraudDecisionEventListenerTest`에 추가한 2건 포함, 전체
+   93건 전부 통과.
+2. **로컬 docker-compose(Kafka/Redis)로 실제 e2e 검증**: 라벨 지연을 3~5초로 임시 단축해서
+   `POST /api/transactions`로 두 시나리오를 재현.
+   - 정상 시퀀스(금액비 1.0, 국가 불변) → `label=0`으로 정확히 시뮬레이션되어
+     `labeled-dataset.jsonl`에 기록됨.
+   - 금액 8배 급증 + 국가변경 시퀀스(2건째 거래) → CP5가 규칙 폴백으로 `action=BLOCK`
+     (`modelSource=FALLBACK`, TorchServe 미기동 상태)을 내렸고, CP6 라벨은 이와 별개로 계산되어
+     `label=1`로 정확히 기록됨 — 판정 액션과 라벨이 서로 다른 계산 경로임을 실측으로 확인.
+   - 두 경우 모두 지연 시간이 지난 후에야 Redis pending 키가 사라지고 JSONL에 나타나는 것을
+     확인(라벨 "지연 공개" 동작 검증).
