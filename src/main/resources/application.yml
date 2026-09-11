@@ -184,3 +184,25 @@ fds:
       high-threshold: ${FDS_DECISION_HIGH_THRESHOLD:0.45}
     # CP5 수동/부하 검증용(FraudDecisionController) — CP3/CP4와 같은 이유로 기본 false.
     query-endpoint-enabled: ${FDS_DECISION_QUERY_ENDPOINT_ENABLED:false}
+  feedback:
+    # CP6 — 재학습 피드백 루프 (docs/ARCHITECTURE.md 6번, backend/feedback-loop 브랜치).
+    # CP5 판정이 끝날 때마다 FeedbackDecisionRecorder가 이 값들로 "라벨 공개 예정 시각"을 정해
+    # Redis에 대기시키고, FeedbackLabelScheduler가 만기된 항목을 JSONL 데이터셋으로 옮긴다.
+    pending-key-prefix: ${FDS_FEEDBACK_PENDING_KEY_PREFIX:feedback:pending:}
+    pending-index-key: ${FDS_FEEDBACK_PENDING_INDEX_KEY:feedback:pending:index}
+    # 라벨(사기 확정/정상 확인)이 실제로는 시간~일 단위로 지연 도착하지만, 로컬 데모/검증이
+    # 가능하도록 기본값은 짧게 잡았다(5~30분) — 실제 운영값으로 쓰려는 게 아니라 이 파이프라인의
+    # "지연 도착 후 조인"이라는 동작 자체를 눈으로 확인하기 위한 값이다.
+    pending-ttl-seconds: ${FDS_FEEDBACK_PENDING_TTL_SECONDS:5400}
+    label-simulator:
+      min-delay-seconds: ${FDS_FEEDBACK_LABEL_MIN_DELAY_SECONDS:300}
+      max-delay-seconds: ${FDS_FEEDBACK_LABEL_MAX_DELAY_SECONDS:1800}
+      # 대칭적 flip 확률 — "조사관도 완벽하지 않다"를 반영한 노이즈(SimulatedLabelHeuristic
+      # 클래스 javadoc 참고). ai/pytorch_sequence_model/tune_ensemble.py의 CostWeights와 마찬가지로
+      # 실제 데이터가 없어 가정한 값이다.
+      flip-probability: ${FDS_FEEDBACK_LABEL_FLIP_PROBABILITY:0.05}
+      # FeedbackLabelScheduler가 만기된 항목을 찾으러 도는 주기(ms).
+      poll-interval-ms: ${FDS_FEEDBACK_LABEL_POLL_INTERVAL_MS:30000}
+    # 조인 결과(JSONL) 출력 경로 — ai/artifacts와 같은 이유로 커밋하지 않는 로컬 산출물
+    # (FeedbackDatasetWriter 클래스 javadoc 참고).
+    dataset-output-path: ${FDS_FEEDBACK_DATASET_OUTPUT_PATH:data/feedback/labeled-dataset.jsonl}

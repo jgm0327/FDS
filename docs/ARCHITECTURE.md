@@ -140,6 +140,52 @@ PyTorch 시퀀스 모델 서빙 (LSTM/Transformer, TorchServe)
     가장 나쁘다는 등 상대적 크기 가정)를 전제로 한다 — 실제 라벨 데이터가 쌓이면 비용표와
     가중치 모두 재검증이 필요하다.
 
+## 6. 피드백 루프 및 재학습 (`backend/feedback-loop`)
+
+핵심 설계 원칙 6번("피드백 루프")의 구현. 이 프로젝트는 실제 은행 라벨(사기 확정/정상 확인)
+데이터가 없으므로, "판정 로그 + 지연 도착하는 라벨을 조인해서 재학습용 데이터셋을 만드는" 파이프라인
+자체를 시뮬레이션으로 구현한다. 위 1~5번이 실시간 판정 경로라면, 이건 그 옆에 붙는 오프라인/비동기
+경로다 — 판정 자체를 막지 않는다.
+
+- **새 Kafka 토픽을 만들지 않는다**: CP1~CP4가 "토픽이 계약"이라는 패턴을 쓴 이유는 서로 다른
+  컨슈머 그룹이 독립적으로 구독해야 했기 때문이다(`docs/WORKTREE_SETUP.md`). 지금 판정 로그를
+  구독할 외부 컨슈머가 없는 상태에서 토픽부터 만드는 건 YAGNI다 — CP5가 "레이스 회피" 때문에
+  Kafka 컨슈머 그룹 대신 애플리케이션 이벤트를 택했던 것과 결이 같다. `FraudDecisionEventListener`가
+  판정 직후, 같은 프로세스 안에서 `FeedbackDecisionRecorder`를 호출해 Redis에 기록한다(나중에
+  외부 감사/분석 컨슈머가 필요해지면 이 지점에 토픽 발행을 추가하면 된다).
+- **라벨은 "지금" 계산하고 "나중에" 공개한다**: 실제 은행 업무도 사기 여부 자체는 거래가 일어난
+  순간 이미 정해져 있고, 그걸 확인(신고/조사/이의제기 처리)하는 데 시간이 걸릴 뿐이다. 그래서
+  `SimulatedLabelHeuristic`이 판정 시점에 라벨을 즉시 계산해 Redis에 저장해두고, 지연 시간이 지나면
+  `FeedbackLabelScheduler`가 이미 계산된 라벨을 데이터셋으로 "공개"만 한다(재채점하지 않음).
+  - **휴리스틱은 판정 액션/모델 확률을 참조하지 않는다** — 참조하면 "모델이 예측한 걸 그대로
+    라벨로 되먹임"하는 순환 오류가 되어 재학습이 무의미해진다. 대신
+    `ai/pytorch_sequence_model/data/synthetic.py`가 정의한 3가지 이상 패턴(금액 급증 ≥3배, 짧은
+    간격의 연속 거래 ≤30초, 국가변경+금액증가 ≥1.5배)을 시퀀스 자체에서 재현하고, 대칭적 flip
+    노이즈(기본 5%, "조사관도 완벽하지 않다"는 가정)를 더한다. **이건 명백한 가정이다** —
+    `ai/pytorch_sequence_model/tune_ensemble.py`의 `CostWeights`가 이미 "실제 비용 데이터가 없어
+    가정임을 명시"해온 것과 같은 태도다.
+- **Redis pending 저장 + 정렬집합 인덱스**: `feedback:pending:{decisionId}`(JSON, TTL) +
+  `feedback:pending:index`(ZSET, score=라벨 공개 예정 시각 epoch초). 스케줄러가
+  `ZRANGEBYSCORE(-inf, now)`로 만기된 항목만 조회한다 — `KEYS` 전체 스캔을 피하는 표준 패턴.
+- **출력은 JSONL 파일**(`data/feedback/labeled-dataset.jsonl`, `ai/artifacts`처럼 커밋하지 않는
+  로컬 산출물), Kafka 토픽이 아니다 — AI 쪽이 Python Kafka 클라이언트 의존성을 새로 추가하지 않아도
+  된다. **알려진 한계**: 단일 인스턴스 전제라 파일 append에 프로세스 간 락이 없다 — 운영 규모라면
+  공유 스토리지나 Kafka 토픽으로 바꿔야 한다.
+- **레코드 스키마는 TorchServe wire 스키마와 맞춘다** — `transactions:
+  [{amountRatio, gapSec, countryChanged, merchantCategory}]`를 그대로 써서, AI 쪽이 이 JSONL을
+  기존 `TransactionStep`/`AccountSequence` 스키마로 필드 변환 없이 파싱할 수 있게 했다.
+- **손상된 레코드는 재시도하지 않고 버린다**: pending 레코드 파싱/데이터셋 파일 쓰기가 실패해도
+  즉시 Redis에서 제거한다 — 완전한 DLQ보다 "실패하면 버리고 계속 진행"이 이번 토이 프로젝트
+  범위에서는 더 합리적인 트레이드오프라고 판단했다.
+- **실측 확인**(2026-09-11, `docs/sessions/2026-09-11_backend-feedback-loop_session-01.md` 참고):
+  로컬 docker-compose(Kafka/Redis)에 실제로 거래 이벤트를 발행해 CP1→CP2→CP3→CP5→CP6 전체
+  파이프라인이 동작하는 걸 확인했다. 정상 시퀀스는 label=0, 금액 8배 급증+국가변경 시퀀스는
+  label=1로 정확히 시뮬레이션됐고, 지연(3~5초로 임시 단축) 후 `labeled-dataset.jsonl`에 조인된
+  레코드가 정확히 나타났다.
+- **다음 세션 범위(`ai/retraining-pipeline`)**: 이 JSONL을 로드해 합성 데이터와 블렌딩,
+  기존 `best_model.pt` 대비 비용 함수(`tune_ensemble.py`와 동일 방식) 기준 개선이 없으면 승격하지
+  않는 concept-drift 체크. 아직 구현되지 않았다.
+
 ## 아직 논의/구현 필요 사항 (TODO)
 
 - [ ] 파티션 수/컨슈머 인스턴스 수 구체적 산정 기준
@@ -151,5 +197,8 @@ PyTorch 시퀀스 모델 서빙 (LSTM/Transformer, TorchServe)
       결론을 못 내려서 운영 환경 재검증이 남아있음.
 - [x] ~~앙상블 가중치/임계값 초기값 산정 방법~~ → `ai/ensemble-weight-tuning`에서 그리드서치로
       구현 완료 (위 5번 "판정 및 대응" 참고). 실제 라벨 데이터 확보 시 재검증 필요는 남아있음.
-- [ ] 재학습 파이프라인(라벨 지연, concept drift 대응) 구체 설계
+- [x] ~~재학습 파이프라인(라벨 지연, concept drift 대응) 구체 설계~~ → 백엔드 절반(판정 기록 →
+      라벨 시뮬레이션 → 조인 → 데이터셋 파일 출력)은 `backend/feedback-loop`에서 구현 완료(위
+      6번 참고). AI 쪽(데이터셋으로 실제 재학습 + concept-drift 승격 체크)은 `ai/retraining-pipeline`
+      브랜치로 남아있음.
 - [ ] CP1~CP7 체크포인트를 이 5단계 경계에 재배치

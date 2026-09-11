@@ -2,11 +2,14 @@ package com.fdsv2.decision;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fdsv2.featurestore.FeatureStoreUpdatedEvent;
+import com.fdsv2.feedback.FeedbackDecisionRecorder;
+import com.fdsv2.modelclient.AccountRecentSequenceReader;
 import com.fdsv2.modelclient.RawFeatureStep;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
@@ -52,6 +55,13 @@ import org.springframework.stereotype.Component;
  * 재는 건 중복이다. 대신 이 지표는 "전용 스레드풀({@code fraudDecisionExecutor})에 판정이 큐잉된
  * 시간까지 포함한, CP5 자체의 실제 체감 지연"을 정확히 보여준다 — 풀이 포화되면 이 값이 늘어나는
  * 것으로 드러난다.
+ *
+ * <p>(backend/feedback-loop) 판정이 성공한 직후 CP6({@link FeedbackDecisionRecorder})에도 기록을
+ * 넘긴다 — 이 시점에 {@link AccountRecentSequenceReader}로 "판정에 실제로 쓰인 시퀀스"를 다시
+ * 읽어서 함께 넘기는 이유는, 나중에 재학습 데이터셋을 만들 때 모델이 실제로 본 입력과 다른
+ * 시퀀스를 쓰면 train-serving skew가 재발하기 때문이다. 이 기록도 CP5 판정 자체와 분리된 별도
+ * try/catch로 감싼다 — CP6이 실패해도 CP5 판정 결과에는 영향이 없어야 한다(위 e2e latency 기록과
+ * 같은 실패 격리 원칙).
  */
 @Slf4j
 @Component
@@ -60,14 +70,17 @@ public class FraudDecisionEventListener {
 
     private final FraudDecisionService fraudDecisionService;
     private final MeterRegistry meterRegistry;
+    private final AccountRecentSequenceReader recentSequenceReader;
+    private final FeedbackDecisionRecorder feedbackDecisionRecorder;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Async("fraudDecisionExecutor")
     @EventListener
     public void onFeatureStoreUpdated(FeatureStoreUpdatedEvent event) {
+        FraudDecision decision;
         try {
             RawFeatureStep latestStep = objectMapper.readValue(event.featureJson(), RawFeatureStep.class);
-            fraudDecisionService.decide(event.accountId(), latestStep);
+            decision = fraudDecisionService.decide(event.accountId(), latestStep);
         } catch (Exception e) {
             log.warn("CP5 자동 판정 실패, 건너뜀: accountId={}, cause={}", event.accountId(), e.toString());
             return;
@@ -75,7 +88,18 @@ public class FraudDecisionEventListener {
         // 코드 리뷰 지적: 판정 자체(decide())는 이미 성공해서 로그/카운터까지 남긴 뒤인데, 지표
         // 기록만 별도 try에서 하지 않으면 지표 등록 실패 같은 사소한 문제조차 "CP5 자동 판정
         // 실패"로 오해할 수 있는 로그를 남긴다. 판정 성공/실패와 지표 기록 성공/실패를 분리한다.
+        recordFeedback(event.accountId(), decision);
         recordE2eLatency(event);
+    }
+
+    private void recordFeedback(String accountId, FraudDecision decision) {
+        try {
+            List<RawFeatureStep> sequence = recentSequenceReader.readRecentSteps(accountId);
+            feedbackDecisionRecorder.record(accountId, decision, sequence);
+        } catch (Exception e) {
+            log.warn("CP6 피드백 기록 실패(판정 자체는 이미 성공함), 건너뜀: accountId={}, cause={}",
+                    accountId, e.toString());
+        }
     }
 
     private void recordE2eLatency(FeatureStoreUpdatedEvent event) {
